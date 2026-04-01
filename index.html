@@ -1385,10 +1385,6 @@ function drawCrossGatiLayer(index, x, y, w, h, vState) {
 
     fill(isCurrent ? '#E0C097' : `rgba(224, 192, 151, ${0.05 + sGlow * 0.15})`);
     noStroke(); rect(x + 8 + s * subW, subY, subW - 2, 16, 3);
-
-    fill(isCurrent ? '#121214' : '#666');
-    textAlign(CENTER, CENTER); textSize(8);
-    text((s + 1).toString(), x + 8 + s * subW + (subW - 2)/2, subY + 8);
   }
 }
 
