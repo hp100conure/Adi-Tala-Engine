@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Ādi Tāḷa Ultimate Engine V26</title>
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="exercise_cells.js"></script>
+  <script src="exercise_patterns.js"></script>
+
+  <style>
+    body {
+      margin: 0; padding: 0;
+      background-color: #121214;
+      display: flex; justify-content: center; align-items: center;
+      height: 100vh; color: #E0C097;
+      font-family: 'Courier New', Courier, monospace;
+      overflow: hidden; touch-action: none;
+    }
+    canvas { display: block; touch-action: none; }
+  </style>
+</head>
+<body>
+
+<script>
+/**
+ * Ādi Tāḷa Ultimate Engine (v26 - Soft Scale Update)
+ * - [FIX] Phrase scale changes (L8/L7/L6/L5) no longer hard-reset the transport.
+ * - [FIX] startOffsetSteps is now calculated dynamically inside the phrase scheduler.
+ * - [FIX] Visual playback position remains continuous when switching phrase scales.
+ */
+
+// --- MATH HELPERS ---
+function gcd(a, b) {
+  while (b !== 0) { let t = b; b = a % b; a = t; }
+  return a;
+}
+function lcm(a, b) {
+  return (a * b) / gcd(a, b);
+}
+
+// --- DATA MODEL ---
+// Cells and patterns are intentionally separated:
+// - cells are reusable rhythmic vocabulary units such as C3..C10
+// - patterns are higher-level exercise recipes built from those cells
+// Existing Phrase Mode is still legacy/fixed-function for L8/L7/L6/L5, and
+// this new exercise layer is wired in as a safe future-facing data foundation.
+const LEGACY_PHRASE_SCALES = Object.freeze({
+  5: Object.freeze(['ta', 'ka', 'ta', 'ki', 'ta']),
+  6: Object.freeze(['ta', 'ka', 'ta', 'ka', 'di', 'mi']),
+  7: Object.freeze(['ta', 'ki', 'ta', 'ta', 'ka', 'di', 'mi']),
+  8: Object.freeze(['ta', 'ka', 'di', 'mi', 'ta', 'ka', 'ju', 'no'])
+});
+
+const LEGACY_PHRASE_ACCENT_PATTERNS = Object.freeze({
+  5: Object.freeze([2, 3]),
+  6: Object.freeze([2, 4]),
+  7: Object.freeze([3, 4]),
+  8: Object.freeze([4, 4])
+});
+
+const LEGACY_JATHI_SYLLABLES = Object.freeze({
+  3: Object.freeze(['ta', 'ki', 'ta']),
+  4: Object.freeze(['ta', 'ka', 'di', 'mi']),
+  5: Object.freeze(['ta', 'di', 'ge', 'na', 'dom']),
+  7: Object.freeze(['ta', 'ka', 'ta', 'di', 'ge', 'na', 'dom'])
+});
+
+const LEGACY_TALA = Object.freeze({
+  beats: 8,
+  beatData: Object.freeze([
+    Object.freeze({ index: 0, group: 'Laghu', gesture: 'Clap', type: 'samam' }),
+    Object.freeze({ index: 1, group: 'Laghu', gesture: 'Little', type: 'normal' }),
+    Object.freeze({ index: 2, group: 'Laghu', gesture: 'Ring', type: 'normal' }),
+    Object.freeze({ index: 3, group: 'Laghu', gesture: 'Middle', type: 'normal' }),
+    Object.freeze({ index: 4, group: 'Drutam', gesture: 'Clap', type: 'sub-accent' }),
+    Object.freeze({ index: 5, group: 'Drutam', gesture: 'Wave', type: 'normal' }),
+    Object.freeze({ index: 6, group: 'Drutam', gesture: 'Clap', type: 'sub-accent' }),
+    Object.freeze({ index: 7, group: 'Drutam', gesture: 'Wave', type: 'normal' })
+  ])
+});
+
+const LEGACY_UI_PRESETS = Object.freeze({
+  phraseScales: Object.freeze([8, 7, 6, 5]),
+  phraseMultipliers: Object.freeze([1, 2, 3, 4]),
+  crossValues: Object.freeze([3, 4, 5, 7])
+});
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function isStringList(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isPositiveIntegerList(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => isPositiveInteger(item));
+}
+
+function isTokenList(value) {
+  return Array.isArray(value) && value.every((token) => (
+    isPlainObject(token) &&
+    typeof token.text === 'string' &&
+    isPositiveInteger(token.units)
+  ));
+}
+
+const EXERCISE_CELLS = isPlainObject(window.ADI_TALA_EXERCISE_CELLS) ? window.ADI_TALA_EXERCISE_CELLS : {};
+const EXERCISE_PATTERNS = isPlainObject(window.ADI_TALA_EXERCISE_PATTERNS) ? window.ADI_TALA_EXERCISE_PATTERNS : {};
+
+const PHRASE_SCALES = Object.freeze({
+  5: isStringList(EXERCISE_CELLS.phraseScales?.[5]?.units) ? EXERCISE_CELLS.phraseScales[5].units : LEGACY_PHRASE_SCALES[5],
+  6: isStringList(EXERCISE_CELLS.phraseScales?.[6]?.units) ? EXERCISE_CELLS.phraseScales[6].units : LEGACY_PHRASE_SCALES[6],
+  7: isStringList(EXERCISE_CELLS.phraseScales?.[7]?.units) ? EXERCISE_CELLS.phraseScales[7].units : LEGACY_PHRASE_SCALES[7],
+  8: isStringList(EXERCISE_CELLS.phraseScales?.[8]?.units) ? EXERCISE_CELLS.phraseScales[8].units : LEGACY_PHRASE_SCALES[8]
+});
+
+const PHRASE_ACCENT_PATTERNS = Object.freeze({
+  5: isPositiveIntegerList(EXERCISE_PATTERNS.phrasePatterns?.[5]?.ladder) ? EXERCISE_PATTERNS.phrasePatterns[5].ladder : LEGACY_PHRASE_ACCENT_PATTERNS[5],
+  6: isPositiveIntegerList(EXERCISE_PATTERNS.phrasePatterns?.[6]?.ladder) ? EXERCISE_PATTERNS.phrasePatterns[6].ladder : LEGACY_PHRASE_ACCENT_PATTERNS[6],
+  7: isPositiveIntegerList(EXERCISE_PATTERNS.phrasePatterns?.[7]?.ladder) ? EXERCISE_PATTERNS.phrasePatterns[7].ladder : LEGACY_PHRASE_ACCENT_PATTERNS[7],
+  8: isPositiveIntegerList(EXERCISE_PATTERNS.phrasePatterns?.[8]?.ladder) ? EXERCISE_PATTERNS.phrasePatterns[8].ladder : LEGACY_PHRASE_ACCENT_PATTERNS[8]
+});
+
+const JATHI_SYLLABLES = Object.freeze({
+  3: isStringList(EXERCISE_CELLS.jathiSyllables?.[3]?.units) ? EXERCISE_CELLS.jathiSyllables[3].units : LEGACY_JATHI_SYLLABLES[3],
+  4: isStringList(EXERCISE_CELLS.jathiSyllables?.[4]?.units) ? EXERCISE_CELLS.jathiSyllables[4].units : LEGACY_JATHI_SYLLABLES[4],
+  5: isStringList(EXERCISE_CELLS.jathiSyllables?.[5]?.units) ? EXERCISE_CELLS.jathiSyllables[5].units : LEGACY_JATHI_SYLLABLES[5],
+  7: isStringList(EXERCISE_CELLS.jathiSyllables?.[7]?.units) ? EXERCISE_CELLS.jathiSyllables[7].units : LEGACY_JATHI_SYLLABLES[7]
+});
+
+const TALA_BEATS = isPositiveInteger(EXERCISE_PATTERNS.tala?.beats) ? EXERCISE_PATTERNS.tala.beats : LEGACY_TALA.beats;
+const beatData = Array.isArray(EXERCISE_PATTERNS.tala?.beatData) && EXERCISE_PATTERNS.tala.beatData.length === TALA_BEATS
+  ? EXERCISE_PATTERNS.tala.beatData
+  : LEGACY_TALA.beatData;
+
+const UI_PRESETS = Object.freeze({
+  phraseScales: isPositiveIntegerList(EXERCISE_PATTERNS.uiPresets?.phraseScales) ? EXERCISE_PATTERNS.uiPresets.phraseScales : LEGACY_UI_PRESETS.phraseScales,
+  phraseMultipliers: isPositiveIntegerList(EXERCISE_PATTERNS.uiPresets?.phraseMultipliers) ? EXERCISE_PATTERNS.uiPresets.phraseMultipliers : LEGACY_UI_PRESETS.phraseMultipliers,
+  crossValues: isPositiveIntegerList(EXERCISE_PATTERNS.uiPresets?.crossValues) ? EXERCISE_PATTERNS.uiPresets.crossValues : LEGACY_UI_PRESETS.crossValues
+});
+
+function getPhraseScaleCell(scaleLength) {
+  const units = PHRASE_SCALES[scaleLength];
+  return units ? { id: `L${scaleLength}`, units } : null;
+}
+
+function getPhraseScaleUnits(scaleLength) {
+  return PHRASE_SCALES[scaleLength] ?? [];
+}
+
+function getPhrasePattern(scaleLength) {
+  const pattern = EXERCISE_PATTERNS.phrasePatterns?.[scaleLength];
+  if (pattern && isPositiveIntegerList(pattern.ladder)) return pattern;
+  const ladder = PHRASE_ACCENT_PATTERNS[scaleLength];
+  return ladder ? { id: `phrase_l${scaleLength}`, ladder } : null;
+}
+
+function getPhraseAccentPattern(scaleLength) {
+  return PHRASE_ACCENT_PATTERNS[scaleLength] ?? null;
+}
+
+function getJathiCell(jathi) {
+  const units = JATHI_SYLLABLES[jathi];
+  return units ? { id: `J${jathi}`, units } : null;
+}
+
+function getJathiUnits(jathi) {
+  return JATHI_SYLLABLES[jathi] ?? [];
+}
+
+function normalizeCellRef(cellRef) {
+  if (isPositiveInteger(cellRef)) return `C${cellRef}`;
+  if (typeof cellRef === 'string' && /^C\d+$/i.test(cellRef)) return cellRef.toUpperCase();
+  return null;
+}
+
+function sumExerciseTokenUnits(tokens) {
+  if (!isTokenList(tokens)) return null;
+  return tokens.reduce((total, token) => total + token.units, 0);
+}
+
+// The helpers below are intentionally small and pure so future exercise-mode
+// work can build on them without disturbing the current phrase-mode runtime.
+// Some pattern endings are still inferred placeholders, so these helpers expose
+// the data honestly instead of pretending every preset is musically finalized.
+function getExerciseCell(cellRef) {
+  const normalizedRef = normalizeCellRef(cellRef);
+  const cellById = normalizedRef ? EXERCISE_CELLS.cells?.[normalizedRef] : null;
+  if (cellById && isTokenList(cellById.tokens) && isPositiveInteger(cellById.units) && sumExerciseTokenUnits(cellById.tokens) === cellById.units) {
+    return cellById;
+  }
+
+  if (isPositiveInteger(cellRef)) {
+    const cellByUnits = EXERCISE_CELLS.cellsByUnits?.[cellRef];
+    if (cellByUnits && isTokenList(cellByUnits.tokens) && isPositiveInteger(cellByUnits.units) && sumExerciseTokenUnits(cellByUnits.tokens) === cellByUnits.units) {
+      return cellByUnits;
+    }
+  }
+
+  return null;
+}
+
+function getExercisePattern(patternId) {
+  if (typeof patternId !== 'string') return null;
+  const pattern = EXERCISE_PATTERNS.exercisePatterns?.[patternId] ?? null;
+  if (!pattern || typeof pattern.cellRef !== 'string' || !isPositiveIntegerList(pattern.ladder)) return null;
+  if (!getExerciseCell(pattern.cellRef)) return null;
+  if (pattern.templateRef && !getExerciseTemplate(pattern.templateRef)) return null;
+  return pattern;
+}
+
+function getExerciseTemplate(templateId) {
+  if (typeof templateId !== 'string') return null;
+  const template = EXERCISE_PATTERNS.templates?.[templateId] ?? null;
+  if (!template || !isPositiveIntegerList(template.ladder) || !isPositiveInteger(template.windowUnits)) return null;
+  return template;
+}
+
+function computeExerciseCoreUnits(pattern) {
+  if (!pattern || !isPositiveIntegerList(pattern.ladder)) return null;
+  const cell = getExerciseCell(pattern.cellRef);
+  if (!cell) return null;
+  const baseUnits = sumExerciseTokenUnits(cell.tokens);
+  if (baseUnits === null) return null;
+  return pattern.ladder.reduce((total, scale) => total + baseUnits * scale, 0);
+}
+
+function computeExerciseTailUnits(pattern) {
+  const ending = getExerciseEnding(pattern);
+  if (!ending) return null;
+  return sumExerciseTokenUnits(ending.tail);
+}
+
+function expandExerciseTokens(cellOrRef, ladder) {
+  const cell = isPlainObject(cellOrRef) ? cellOrRef : getExerciseCell(cellOrRef);
+  if (!cell || !isTokenList(cell.tokens) || !isPositiveIntegerList(ladder)) return null;
+
+  const events = [];
+  ladder.forEach((scale, ladderIndex) => {
+    cell.tokens.forEach((token, tokenIndex) => {
+      events.push({
+        cellId: cell.id,
+        ladderIndex,
+        tokenIndex,
+        text: token.text,
+        baseUnits: token.units,
+        scale,
+        units: token.units * scale
+      });
+    });
+  });
+  return events;
+}
+
+function logExerciseDataSummary() {
+  if (logExerciseDataSummary.didRun) return;
+  logExerciseDataSummary.didRun = true;
+
+  const cellIds = Object.keys(EXERCISE_CELLS.cells ?? {});
+  const patternIds = Object.keys(EXERCISE_PATTERNS.exercisePatterns ?? {});
+
+  console.info('[Adi Tala] exercise cells loaded:', cellIds.length ? cellIds.join(', ') : '(none)');
+  console.info('[Adi Tala] exercise patterns loaded:', patternIds.length ? patternIds.join(', ') : '(none)');
+
+  if (!cellIds.length) {
+    console.warn('[Adi Tala] Exercise cell dictionary missing or malformed; legacy phrase data will continue to run.');
+  }
+
+  if (!patternIds.length) {
+    console.warn('[Adi Tala] Exercise pattern dictionary missing or malformed; legacy phrase data will continue to run.');
+  }
+}
+
+function getAvailableExercisePatternIds() {
+  return Object.keys(EXERCISE_PATTERNS.exercisePatterns ?? {}).filter((patternId) => patternId.endsWith('_aligned'));
+}
+
+function getDefaultExercisePatternId() {
+  const ids = getAvailableExercisePatternIds();
+  return ids.length ? ids[0] : null;
+}
+
+function ensureSelectedExercisePattern() {
+  const availableIds = getAvailableExercisePatternIds();
+  if (!availableIds.length) {
+    selectedExercisePatternId = null;
+    return;
+  }
+
+  if (!selectedExercisePatternId || !availableIds.includes(selectedExercisePatternId)) {
+    selectedExercisePatternId = availableIds[0];
+  }
+}
+
+function getExerciseButtonLabel(patternId) {
+  return patternId
+    .replace('ex', 'EX')
+    .replace('_aligned', 'A')
+    .replace('_tang', 'T');
+}
+
+function getSelectedExercisePreview() {
+  const pattern = getExercisePattern(selectedExercisePatternId);
+  if (!pattern) return null;
+
+  const cell = getExerciseCell(pattern.cellRef);
+  if (!cell) return null;
+
+  const ending = getExerciseEnding(pattern);
+  const template = getExerciseTemplate(pattern.templateRef);
+
+  return {
+    pattern,
+    cell,
+    ending,
+    template,
+    coreUnits: computeExerciseCoreUnits(pattern),
+    tailUnits: computeExerciseTailUnits(pattern)
+  };
+}
+
+function getExerciseEnding(pattern) {
+  if (!pattern) return null;
+
+  const ending = typeof pattern.endingRef === 'string'
+    ? EXERCISE_PATTERNS.endingLibrary?.[pattern.endingRef] ?? null
+    : pattern.ending ?? null;
+
+  if (!ending || !isTokenList(ending.tail)) return null;
+  return ending;
+}
+
+function buildExercisePhraseEvents(pattern, cell, ending) {
+  const baseEvents = expandExerciseTokens(cell, pattern.ladder);
+  if (!baseEvents) return null;
+
+  const phraseEvents = [];
+  let cursor = 0;
+
+  baseEvents.forEach((event) => {
+    phraseEvents.push({
+      ...event,
+      startUnit: cursor,
+      endUnit: cursor + event.units,
+      isAccent: event.tokenIndex === 0,
+      isTail: false,
+      silent: false,
+      source: 'core'
+    });
+    cursor += event.units;
+  });
+
+  ending.tail.forEach((token, tailIndex) => {
+    phraseEvents.push({
+      cellId: cell.id,
+      ladderIndex: pattern.ladder.length,
+      tokenIndex: tailIndex,
+      text: token.text,
+      baseUnits: token.units,
+      scale: 1,
+      units: token.units,
+      startUnit: cursor,
+      endUnit: cursor + token.units,
+      isAccent: true,
+      isTail: true,
+      silent: false,
+      source: 'ending'
+    });
+    cursor += token.units;
+  });
+
+  return {
+    phraseEvents,
+    phraseUnits: cursor
+  };
+}
+
+function buildPlayableExerciseRuntime(pattern) {
+  if (!pattern || !isPositiveIntegerList(pattern.ladder)) return null;
+
+  const cell = getExerciseCell(pattern.cellRef);
+  const ending = getExerciseEnding(pattern);
+  const template = getExerciseTemplate(pattern.templateRef);
+  if (!cell || !ending || !template) return null;
+  if (!isPositiveInteger(template.windowUnits) || !isPositiveInteger(pattern.fullCycleWindows)) return null;
+
+  const unitsPerBeat = template.windowUnits / TALA_BEATS;
+  if (!Number.isInteger(unitsPerBeat) || unitsPerBeat <= 0) return null;
+
+  const phraseBuild = buildExercisePhraseEvents(pattern, cell, ending);
+  if (!phraseBuild || !phraseBuild.phraseUnits) return null;
+
+  const horizonUnits = pattern.fullCycleWindows * template.windowUnits;
+  if (phraseBuild.phraseUnits > horizonUnits) return null;
+
+  const horizonEvents = [];
+  let repetition = 0;
+  let phraseStartUnit = 0;
+  while (phraseStartUnit < horizonUnits) {
+    phraseBuild.phraseEvents.forEach((event) => {
+      const startUnit = phraseStartUnit + event.startUnit;
+      const endUnit = phraseStartUnit + event.endUnit;
+      if (startUnit >= horizonUnits) return;
+
+      horizonEvents.push({
+        ...event,
+        repetition,
+        startUnit,
+        endUnit: Math.min(endUnit, horizonUnits)
+      });
+    });
+    repetition++;
+    phraseStartUnit += phraseBuild.phraseUnits;
+  }
+
+  const startEventIndices = new Array(horizonUnits).fill(-1);
+  horizonEvents.forEach((event, eventIndex) => {
+    if (event.startUnit < horizonUnits) startEventIndices[event.startUnit] = eventIndex;
+  });
+
+  return {
+    pattern,
+    cell,
+    ending,
+    template,
+    phraseUnits: phraseBuild.phraseUnits,
+    windowUnits: template.windowUnits,
+    fullCycleWindows: pattern.fullCycleWindows,
+    horizonUnits,
+    unitsPerBeat,
+    events: horizonEvents,
+    startEventIndices
+  };
+}
+
+function getPlayableExerciseRuntime() {
+  // Exercise_01 stays the legacy phrase path. Exercise_02 only takes over
+  // playback when its panel is open and the legacy phrase panel is closed.
+  if (appMode !== 'phrase' || !isExercisePreviewPanelOpen || isPhraseExercisePanelOpen) return null;
+  return buildPlayableExerciseRuntime(getExercisePattern(selectedExercisePatternId));
+}
+
+window.ADI_TALA_EXERCISE_API = Object.freeze({
+  getExerciseCell,
+  getExercisePattern,
+  getExerciseTemplate,
+  getExerciseEnding,
+  computeExerciseCoreUnits,
+  computeExerciseTailUnits,
+  expandExerciseTokens,
+  buildPlayableExerciseRuntime
+});
+
+// --- STATE ---
+let isStarted = false;
+let audioInitialized = false; 
+let audioInitPromise = null;
+let isPlaying = false;
+let scheduleDirty = false; 
+let currentBPM = 80;
+
+let appMode = 'phrase'; 
+
+let phraseMultiplier = 1; 
+let currentPhraseScale = 8;
+let currentGati = 4;  
+let currentJathi = 3; 
+
+let talaAudioMode = 'soft';   
+let phraseAudioMode = 'soft'; 
+let jathiAudioMode = 'on';    
+
+let phraseStepCounter = 0;
+let crossStepCounter = 0;
+
+let transportEventId = null;
+let stepGlows = []; 
+let beatGlows = new Array(TALA_BEATS).fill(0);
+let jathiHitGlows = []; 
+let exerciseEventGlows = [];
+let exerciseStepCounter = 0;
+
+// --- AUDIO SYNTHS ---
+let masterCompressor, masterLimiter;
+let topSynth, accentSynth, beatSynth, jathiSynth, phraseSynth;
+
+// --- UI METRICS ---
+let isMobile = false;
+let isShortScreen = false;
+let btns = {}; 
+let modeBtns = {};
+let paramBtns = [];
+let audioBtnsLayout = [];
+let exercisePatternBtns = [];
+let phraseExercisePanel = null;
+let exercisePreviewPanel = null;
+let slider = { x: 0, y: 0, w: 250, h: 6, handleR: 10, dragging: false };
+let selectedExercisePatternId = null;
+let isPhraseExercisePanelOpen = false;
+let isExercisePreviewPanelOpen = false;
+let phrasePanelContentAlpha = 0;
+let exercisePanelContentAlpha = 0;
+
+function getCanvasPoint(e, canvasElt) {
+  const rect = canvasElt.getBoundingClientRect();
+  return {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top
+  };
+}
+
+function setup() {
+  let cvs = createCanvas(windowWidth, windowHeight);
+  textFont('monospace');
+  logExerciseDataSummary();
+  selectedExercisePatternId = getDefaultExercisePatternId();
+  
+  cvs.elt.addEventListener('pointerdown', async (e) => {
+    if (!e.isPrimary) return;
+    const p = getCanvasPoint(e, cvs.elt);
+    await handleGesture(p.x, p.y);
+  });
+  cvs.elt.addEventListener('pointermove', (e) => {
+    if (!e.isPrimary) return;
+    if (slider.dragging) {
+      const p = getCanvasPoint(e, cvs.elt);
+      updateBPM(p.x);
+    }
+  });
+  window.addEventListener('pointerup', () => {
+    slider.dragging = false;
+  });
+
+  updateLayout();
+}
+
+// ==========================================
+// LIFECYCLE MANAGEMENT
+// ==========================================
+function emergencyStopAudio() {
+  if (!audioInitialized) return;
+  Tone.Transport.stop();
+  Tone.Transport.position = "0:0:0";
+  Tone.Transport.cancel(0); 
+  transportEventId = null;
+
+  isPlaying = false;
+  slider.dragging = false;
+  scheduleDirty = true; 
+  resetStepCounters();
+
+  stepGlows.fill(0);
+  beatGlows.fill(0);
+  jathiHitGlows.fill(0);
+  exerciseEventGlows.fill(0);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) emergencyStopAudio();
+});
+window.addEventListener('pagehide', emergencyStopAudio);
+window.addEventListener('beforeunload', emergencyStopAudio);
+
+// ==========================================
+// AUDIO INITIALIZATION
+// ==========================================
+function initAudioIfNeeded() {
+  if (audioInitialized) return Promise.resolve();
+  if (audioInitPromise) return audioInitPromise;
+
+  audioInitPromise = (async () => {
+    try {
+      await Tone.start(); 
+      Tone.Transport.PPQ = 840; 
+
+      masterCompressor = new Tone.Compressor({ threshold: -12, ratio: 4 }).toDestination();
+      masterLimiter = new Tone.Limiter(-2).connect(masterCompressor);
+
+      topSynth = new Tone.MembraneSynth({ pitchDecay: 0.1, octaves: 4, envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 1.4 } }).connect(masterLimiter);
+      accentSynth = new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 3, envelope: { attack: 0.001, decay: 0.3, sustain: 0, release: 0.8 } }).connect(masterLimiter);
+      beatSynth = new Tone.MembraneSynth({ pitchDecay: 0.01, octaves: 2, envelope: { attack: 0.001, decay: 0.15, sustain: 0, release: 0.1 } }).connect(masterLimiter);
+
+      const jathiFilter = new Tone.Filter(4000, "highpass").connect(masterLimiter);
+      jathiSynth = new Tone.Synth({
+        oscillator: { type: "square" },
+        envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.03 }
+      }).connect(jathiFilter);
+
+      phraseSynth = new Tone.Synth({
+        oscillator: { type: "triangle" },
+        envelope: { attack: 0.001, decay: 0.03, sustain: 0, release: 0.02 }
+      }).connect(masterLimiter);
+
+      Tone.Transport.bpm.value = currentBPM;
+      audioInitialized = true; 
+      applyAudioModes(); 
+      applyRhythmSchedule();
+    } catch (err) {
+      audioInitPromise = null;
+      throw err;
+    }
+  })();
+
+  return audioInitPromise;
+}
+
+function applyAudioModes() {
+  if (!audioInitialized) return; 
+
+  if (talaAudioMode === 'off') {
+    topSynth.volume.value = -60;
+    accentSynth.volume.value = -60;
+    beatSynth.volume.value = -60;
+  } else if (talaAudioMode === 'soft') {
+    topSynth.volume.value = 0;
+    accentSynth.volume.value = -8;
+    beatSynth.volume.value = -18;
+  } else {
+    topSynth.volume.value = 4;
+    accentSynth.volume.value = -2;
+    beatSynth.volume.value = -12;
+  }
+
+  if (phraseAudioMode === 'off') phraseSynth.volume.value = -60;
+  else if (phraseAudioMode === 'soft') phraseSynth.volume.value = -12;
+  else phraseSynth.volume.value = -7;
+
+  if (jathiAudioMode === 'off') jathiSynth.volume.value = -60;
+  else if (jathiAudioMode === 'soft') jathiSynth.volume.value = -8;
+  else jathiSynth.volume.value = -1;
+}
+
+function nextAudioState(current) {
+  if (current === 'off') return 'soft';
+  if (current === 'soft') return 'on';
+  return 'off';
+}
+
+function isPhraseAccent(localIndex, scaleLength) {
+  const pattern = getPhraseAccentPattern(scaleLength);
+  if (!pattern) return localIndex === 0;
+
+  let pos = 0;
+  let i = 0;
+  while (pos <= localIndex) {
+    if (pos === localIndex) return true;
+    pos += pattern[i % pattern.length];
+    i++;
+  }
+  return false;
+}
+
+function getCrossCycleInfo() {
+  const baseCycleMatras = TALA_BEATS * currentGati;
+  const fullCycleMatras = lcm(baseCycleMatras, currentJathi);
+  const fullCycleBeats = fullCycleMatras / currentGati;
+
+  return {
+    baseCycleMatras,
+    fullCycleMatras,
+    fullCycleBeats,
+    totalSteps: fullCycleMatras
+  };
+}
+
+// ==========================================
+// CONTINUOUS VISUAL STATE
+// ==========================================
+function getCurrentPhraseVisualState() {
+  if (!isPlaying) return { globalStep: -1, beatIndex: -1, cycleIndex: 0, beatProgress: 0, ticks: 0 };
+
+  const exerciseRuntime = getPlayableExerciseRuntime();
+  if (exerciseRuntime) {
+    const ticks = Tone.Transport.ticks;
+    const ticksPerUnit = Tone.Transport.PPQ / exerciseRuntime.unitsPerBeat;
+    const globalStep = Math.floor(ticks / ticksPerUnit) % exerciseRuntime.horizonUnits;
+    const windowIndex = Math.floor(globalStep / exerciseRuntime.windowUnits);
+    const windowUnit = globalStep % exerciseRuntime.windowUnits;
+    const beatIndex = Math.floor(windowUnit / exerciseRuntime.unitsPerBeat) % TALA_BEATS;
+    const ticksInBeat = ticks % Tone.Transport.PPQ;
+    const beatProgress = ticksInBeat / Tone.Transport.PPQ;
+
+    return { globalStep, beatIndex, cycleIndex: windowIndex, beatProgress, ticks };
+  }
+  
+  const ticks = Tone.Transport.ticks;
+  const ticksPerStep = Tone.Transport.PPQ / phraseMultiplier;
+  const totalSteps = TALA_BEATS * phraseMultiplier;
+
+  const globalStep = Math.floor(ticks / ticksPerStep) % totalSteps;
+  const beatIndex = Math.floor(globalStep / phraseMultiplier) % TALA_BEATS;
+
+  const ticksInBeat = ticks % Tone.Transport.PPQ;
+  const beatProgress = ticksInBeat / Tone.Transport.PPQ;
+
+  return { globalStep, beatIndex, cycleIndex: 0, beatProgress, ticks };
+}
+
+function getCurrentCrossVisualState() {
+  if (!isPlaying) return { globalStep: -1, beatIndex: -1, cycleIndex: 0, beatProgress: 0, ticks: 0 };
+  
+  const cycleInfo = getCrossCycleInfo();
+  const ticks = Tone.Transport.ticks;
+  const ticksPerMatra = Tone.Transport.PPQ / currentGati;
+
+  const globalStep = Math.floor(ticks / ticksPerMatra) % cycleInfo.totalSteps;
+  const beatIndex = Math.floor(globalStep / currentGati) % TALA_BEATS;
+  const cycleIndex = Math.floor(globalStep / (TALA_BEATS * currentGati));
+
+  const ticksInBeat = ticks % Tone.Transport.PPQ;
+  const beatProgress = ticksInBeat / Tone.Transport.PPQ;
+
+  return { globalStep, beatIndex, cycleIndex, beatProgress, ticks };
+}
+
+function getCurrentVisualState() {
+  if (!isPlaying) return { globalStep: -1, beatIndex: -1, cycleIndex: 0, beatProgress: 0, ticks: 0 };
+  return appMode === 'phrase' ? getCurrentPhraseVisualState() : getCurrentCrossVisualState();
+}
+
+// ==========================================
+// SCHEDULING LOGIC
+// ==========================================
+function resetStepCounters() {
+  phraseStepCounter = 0;
+  crossStepCounter = 0;
+  exerciseStepCounter = 0;
+}
+
+function applyRhythmSchedule() {
+  if (transportEventId !== null) Tone.Transport.clear(transportEventId);
+  applyAudioModes(); 
+  
+  if (appMode === 'phrase') {
+    const exerciseRuntime = getPlayableExerciseRuntime();
+    if (exerciseRuntime) applyExerciseSchedule(exerciseRuntime);
+    else applyPhraseSchedule();
+  }
+  else applyCrossSchedule();
+
+  scheduleDirty = false;
+}
+
+function applyPhraseSchedule() {
+  const totalCycleSteps = TALA_BEATS * phraseMultiplier;
+  
+  stepGlows = new Array(totalCycleSteps).fill(0);
+  exerciseEventGlows = [];
+  phraseStepCounter = 0; 
+
+  const ticksPerStep = Math.floor(Tone.Transport.PPQ / phraseMultiplier);
+
+  transportEventId = Tone.Transport.scheduleRepeat((time) => {
+    const globalStep = phraseStepCounter % totalCycleSteps;
+    phraseStepCounter++;
+    
+    const beatIndex = Math.floor(globalStep / phraseMultiplier) % TALA_BEATS;
+    const phraseSubIndex = globalStep % phraseMultiplier;
+    const bData = beatData[beatIndex];
+
+    if (phraseSubIndex === 0) {
+      if (bData.type === 'samam') topSynth.triggerAttackRelease("C2", "8n", time);
+      else if (bData.type === 'sub-accent') accentSynth.triggerAttackRelease("G2", "8n", time);
+      else beatSynth.triggerAttackRelease("C3", "8n", time);
+    }
+
+    // [FIX] Calculate startOffset dynamically within the callback based on current UI state
+    const currentStartOffsetSteps = (TALA_BEATS - currentPhraseScale) * phraseMultiplier;
+
+    if (globalStep >= currentStartOffsetSteps) {
+      const phraseLocalIndex = globalStep - currentStartOffsetSteps;
+      const isAccent = isPhraseAccent(phraseLocalIndex, currentPhraseScale);
+      
+      if (isAccent) jathiSynth.triggerAttackRelease("G6", "64n", time); 
+      else phraseSynth.triggerAttackRelease("D5", "64n", time); 
+    }
+
+    Tone.Draw.schedule(() => {
+      stepGlows[globalStep] = 1.0;
+      if (phraseSubIndex === 0) beatGlows[beatIndex] = 1.0;
+    }, time);
+
+  }, ticksPerStep + "i");
+}
+
+function applyExerciseSchedule(runtime) {
+  const totalCycleUnits = runtime.horizonUnits;
+  const ticksPerUnit = Math.floor(Tone.Transport.PPQ / runtime.unitsPerBeat);
+
+  stepGlows = new Array(totalCycleUnits).fill(0);
+  exerciseEventGlows = new Array(runtime.events.length).fill(0);
+  exerciseStepCounter = 0;
+
+  transportEventId = Tone.Transport.scheduleRepeat((time) => {
+    const globalUnit = exerciseStepCounter % totalCycleUnits;
+    exerciseStepCounter++;
+
+    const windowUnit = globalUnit % runtime.windowUnits;
+    const beatIndex = Math.floor(windowUnit / runtime.unitsPerBeat) % TALA_BEATS;
+    const unitInBeat = windowUnit % runtime.unitsPerBeat;
+    const bData = beatData[beatIndex];
+
+    if (unitInBeat === 0) {
+      if (bData.type === 'samam') topSynth.triggerAttackRelease("C2", "8n", time);
+      else if (bData.type === 'sub-accent') accentSynth.triggerAttackRelease("G2", "8n", time);
+      else beatSynth.triggerAttackRelease("C3", "8n", time);
+    }
+
+    const eventIndex = runtime.startEventIndices[globalUnit];
+    if (eventIndex >= 0) {
+      const event = runtime.events[eventIndex];
+      if (!event.silent) {
+        const releaseTicks = Math.max(1, Math.floor(event.units * ticksPerUnit * 0.9));
+        if (event.isAccent) jathiSynth.triggerAttackRelease("G6", `${releaseTicks}i`, time);
+        else phraseSynth.triggerAttackRelease("D5", `${releaseTicks}i`, time);
+      }
+
+      Tone.Draw.schedule(() => {
+        exerciseEventGlows[eventIndex] = 1.0;
+      }, time);
+    }
+
+    Tone.Draw.schedule(() => {
+      stepGlows[globalUnit] = 1.0;
+      if (unitInBeat === 0) beatGlows[beatIndex] = 1.0;
+    }, time);
+  }, ticksPerUnit + "i");
+}
+
+function applyCrossSchedule() {
+  const cycleInfo = getCrossCycleInfo();
+  const totalSteps = cycleInfo.totalSteps;
+
+  stepGlows = new Array(totalSteps).fill(0);
+  jathiHitGlows = new Array(totalSteps).fill(0);
+  exerciseEventGlows = [];
+  crossStepCounter = 0; 
+  
+  const ticksPerMatra = Math.floor(Tone.Transport.PPQ / currentGati);
+
+  transportEventId = Tone.Transport.scheduleRepeat((time) => {
+    const globalMatra = crossStepCounter % totalSteps;
+    crossStepCounter++;
+    
+    const beatIndex = Math.floor(globalMatra / currentGati) % TALA_BEATS;
+    const subIndex = globalMatra % currentGati;
+    const bData = beatData[beatIndex];
+
+    if (subIndex === 0) {
+      if (bData.type === 'samam') topSynth.triggerAttackRelease("C2", "8n", time);
+      else if (bData.type === 'sub-accent') accentSynth.triggerAttackRelease("G2", "8n", time);
+      else beatSynth.triggerAttackRelease("C3", "8n", time);
+    }
+
+    let isJathiHit = false;
+    if (globalMatra % currentJathi === 0) {
+      jathiSynth.triggerAttackRelease("C6", "32n", time);
+      isJathiHit = true;
+    } else {
+      phraseSynth.triggerAttackRelease("D5", "64n", time);
+    }
+
+    Tone.Draw.schedule(() => {
+      stepGlows[globalMatra] = 1.0;
+      if (subIndex === 0) beatGlows[beatIndex] = 1.0;
+      if (isJathiHit) jathiHitGlows[globalMatra] = 1.0;
+    }, time);
+
+  }, ticksPerMatra + "i");
+}
+
+// ==========================================
+// UI & LAYOUT LOGIC 
+// ==========================================
+
+function updateLayout() {
+  isMobile = width < 800; 
+  isShortScreen = height < 750;
+  let cx = width / 2;
+  ensureSelectedExercisePattern();
+  
+  let by = height - Math.max(30, height * 0.05); 
+  let btnW = isMobile ? 80 : 100;
+  let spacing = isMobile ? 10 : 20;
+  
+  btns.play = { x: cx - btnW - spacing/2, y: by, w: btnW, h: 40, label: () => isPlaying ? "PAUSE" : "PLAY" };
+  btns.reset = { x: cx + spacing/2, y: by, w: btnW, h: 40, label: () => "RESET" };
+  
+  let sliderY = by - (isShortScreen ? 35 : 45);
+  slider = { x: cx - 125, y: sliderY, w: 250, h: 6, handleR: 10, dragging: slider.dragging };
+
+  let aBtnW = isMobile ? 60 : 70;
+  let aGap = 15;
+  let aStartX = cx - (aBtnW * 3 + aGap * 2) / 2;
+  
+  let aStartY = sliderY - (isShortScreen ? 35 : 45); 
+  let paramOffset = appMode === 'phrase' ? (isShortScreen ? 35 : 40) : (isShortScreen ? 45 : 55); 
+  let paramStartY = aStartY - paramOffset;
+
+  audioBtnsLayout = [
+    { id: 'tala', label: 'TALA', x: aStartX, y: aStartY, w: aBtnW, h: 25, get: () => talaAudioMode, set: (m) => talaAudioMode = m },
+    { id: 'phrase', label: 'PHR', x: aStartX + aBtnW + aGap, y: aStartY, w: aBtnW, h: 25, get: () => phraseAudioMode, set: (m) => phraseAudioMode = m },
+    { id: 'jathi', label: 'JATHI', x: aStartX + (aBtnW + aGap)*2, y: aStartY, w: aBtnW, h: 25, get: () => jathiAudioMode, set: (m) => jathiAudioMode = m }
+  ];
+
+  let modeW = 140;
+  let headerModeY = isShortScreen ? 60 : 90;
+  modeBtns.phrase = { x: cx - modeW - 5, y: headerModeY, w: modeW, h: 30, mode: 'phrase', label: 'Phrase Mode' };
+  modeBtns.cross = { x: cx + 5, y: headerModeY, w: modeW, h: 30, mode: 'cross', label: 'Gati / Jathi' };
+
+  if (appMode === 'phrase') buildExercisePanels(sliderY, headerModeY);
+  else buildCrossParamButtons(paramStartY);
+}
+
+function buildExercisePanels(sliderY, headerModeY) {
+  const phraseOpen = appMode === 'phrase' && isPhraseExercisePanelOpen;
+  const exerciseOpen = appMode === 'phrase' && isExercisePreviewPanelOpen;
+  const panelW = min(isMobile ? width * 0.9 : width * 0.68, 780);
+  const panelX = width / 2 - panelW / 2;
+  const headerH = isMobile ? 34 : 32;
+  const panelGap = isMobile ? 10 : 14;
+  const panelPadX = isMobile ? 12 : 14;
+  const panelPadTop = isMobile ? 10 : 12;
+  const rowGap = isMobile ? 8 : 8;
+  const colGap = isMobile ? 10 : 10;
+  const gridCols = isMobile ? 2 : 4;
+  const phraseRows = Math.ceil(UI_PRESETS.phraseScales.length / gridCols) + Math.ceil(UI_PRESETS.phraseMultipliers.length / gridCols);
+  const exerciseRows = Math.ceil(getAvailableExercisePatternIds().length / gridCols);
+  const btnH = isMobile ? 28 : 26;
+  const phraseContentH = panelPadTop + (btnH * phraseRows) + (rowGap * (phraseRows - 1)) + 12;
+  const exerciseInfoH = isMobile ? 34 : 34;
+  const exerciseContentH = panelPadTop + exerciseInfoH + (btnH * exerciseRows) + (rowGap * max(0, exerciseRows - 1)) + 12;
+  const fullPanelH = headerH + max(phraseContentH, exerciseContentH);
+  const phraseH = phraseOpen ? fullPanelH : headerH;
+  const exerciseH = exerciseOpen ? fullPanelH : headerH;
+  const stackH = phraseH + panelGap + exerciseH;
+  const stackBottom = sliderY - (isMobile ? 14 : 22);
+  const minTop = headerModeY + 46;
+  const stackTop = max(minTop, stackBottom - stackH);
+
+  const phrasePanelY = stackTop;
+  const exercisePanelY = phrasePanelY + phraseH + panelGap;
+
+  buildParamButtons({
+    x: panelX,
+    y: phrasePanelY,
+    w: panelW,
+    h: phraseH,
+    fullH: fullPanelH,
+    headerH,
+    padX: panelPadX,
+    padTop: panelPadTop,
+    colGap,
+    rowGap,
+    cols: gridCols,
+    btnH
+  });
+
+  buildExercisePatternPreview({
+    x: panelX,
+    y: exercisePanelY,
+    w: panelW,
+    h: exerciseH,
+    fullH: fullPanelH,
+    headerH,
+    padX: panelPadX,
+    padTop: panelPadTop,
+    colGap,
+    rowGap,
+    cols: gridCols,
+    btnH,
+    infoH: exerciseInfoH
+  });
+}
+
+function buildCrossParamButtons(startY) {
+  phraseExercisePanel = null;
+  exercisePreviewPanel = null;
+  exercisePatternBtns = [];
+  paramBtns = [];
+
+  let cx = width / 2;
+  let btnW = isMobile ? 40 : 50;
+  let gap = 10;
+  let startX = cx - ((btnW * 4) + (gap * 3)) / 2;
+  let vals = UI_PRESETS.crossValues;
+
+  vals.forEach((v, i) => {
+    let isDisabled = (v === currentJathi);
+    paramBtns.push({ x: startX + i * (btnW + gap), y: startY - 35, w: btnW, h: 25, val: v, type: 'gati', label: `G${v}`, disabled: isDisabled });
+  });
+  vals.forEach((v, i) => {
+    let isDisabled = (v === currentGati);
+    paramBtns.push({ x: startX + i * (btnW + gap), y: startY, w: btnW, h: 25, val: v, type: 'jathi', label: `J${v}`, disabled: isDisabled });
+  });
+}
+
+function buildParamButtons(panelLayout) {
+  paramBtns = [];
+  phraseExercisePanel = null;
+  if (appMode !== 'phrase') return;
+
+  const btnW = (panelLayout.w - panelLayout.padX * 2 - panelLayout.colGap * (panelLayout.cols - 1)) / panelLayout.cols;
+  const startY = panelLayout.y + panelLayout.headerH + panelLayout.padTop;
+
+  UI_PRESETS.phraseScales.forEach((v, i) => {
+    const col = i % panelLayout.cols;
+    const row = Math.floor(i / panelLayout.cols);
+    paramBtns.push({
+      x: panelLayout.x + panelLayout.padX + col * (btnW + panelLayout.colGap),
+      y: startY + row * (panelLayout.btnH + panelLayout.rowGap),
+      w: btnW,
+      h: panelLayout.btnH,
+      val: v,
+      type: 'phraseScale',
+      label: `L${v}`
+    });
+  });
+
+  UI_PRESETS.phraseMultipliers.forEach((mult, i) => {
+    const col = i % panelLayout.cols;
+    const row = Math.floor(i / panelLayout.cols) + Math.ceil(UI_PRESETS.phraseScales.length / panelLayout.cols);
+    paramBtns.push({
+      x: panelLayout.x + panelLayout.padX + col * (btnW + panelLayout.colGap),
+      y: startY + row * (panelLayout.btnH + panelLayout.rowGap),
+      w: btnW,
+      h: panelLayout.btnH,
+      val: mult,
+      type: 'phraseMult',
+      label: `×${mult}`
+    });
+  });
+
+  phraseExercisePanel = {
+    x: panelLayout.x,
+    y: panelLayout.y,
+    w: panelLayout.w,
+    h: panelLayout.h,
+    fullH: panelLayout.fullH,
+    headerH: panelLayout.headerH,
+    contentY: startY
+  };
+}
+
+function buildExercisePatternPreview(panelLayout) {
+  exercisePatternBtns = [];
+  exercisePreviewPanel = null;
+
+  if (appMode !== 'phrase') return;
+
+  const patternIds = getAvailableExercisePatternIds();
+  if (!patternIds.length) return;
+
+  const rows = Math.ceil(patternIds.length / panelLayout.cols);
+  const btnW = (panelLayout.w - panelLayout.padX * 2 - panelLayout.colGap * (panelLayout.cols - 1)) / panelLayout.cols;
+  const infoTop = panelLayout.y + panelLayout.headerH + panelLayout.padTop;
+  const btnY = infoTop + panelLayout.infoH;
+
+  exercisePreviewPanel = {
+    x: panelLayout.x,
+    y: panelLayout.y,
+    w: panelLayout.w,
+    h: panelLayout.h,
+    fullH: panelLayout.fullH,
+    headerH: panelLayout.headerH,
+    contentH: panelLayout.fullH - panelLayout.headerH,
+    infoTop,
+    buttonTop: btnY
+  };
+
+  patternIds.forEach((patternId, index) => {
+    const col = index % panelLayout.cols;
+    const row = Math.floor(index / panelLayout.cols);
+    exercisePatternBtns.push({
+      id: patternId,
+      x: panelLayout.x + panelLayout.padX + col * (btnW + panelLayout.colGap),
+      y: btnY + row * (panelLayout.btnH + panelLayout.rowGap),
+      w: btnW,
+      h: panelLayout.btnH,
+      label: getExerciseButtonLabel(patternId)
+    });
+  });
+}
+
+function windowResized() { resizeCanvas(windowWidth, windowHeight); updateLayout(); }
+
+function draw() {
+  background('#121214');
+  
+  if (!isStarted) { 
+    drawStartScreen(); 
+    return; 
+  }
+
+  const frameState = getCurrentVisualState();
+
+  drawHeader(frameState);
+  drawGlobalProgressBar(frameState);
+  drawRhythmGrid(frameState);
+  drawControls();
+  updateAnimations();
+}
+
+function updateAnimations() {
+  for (let i = 0; i < stepGlows.length; i++) stepGlows[i] = Math.max(0, stepGlows[i] - 0.12);
+  for (let i = 0; i < beatGlows.length; i++) beatGlows[i] = Math.max(0, beatGlows[i] - 0.07);
+  for (let i = 0; i < jathiHitGlows.length; i++) jathiHitGlows[i] = Math.max(0, jathiHitGlows[i] - 0.08);
+  for (let i = 0; i < exerciseEventGlows.length; i++) exerciseEventGlows[i] = Math.max(0, exerciseEventGlows[i] - 0.08);
+  phrasePanelContentAlpha = lerp(phrasePanelContentAlpha, isPhraseExercisePanelOpen ? 1 : 0, 0.18);
+  exercisePanelContentAlpha = lerp(exercisePanelContentAlpha, isExercisePreviewPanelOpen ? 1 : 0, 0.18);
+}
+
+// ==========================================
+// RENDERING
+// ==========================================
+
+function drawStartScreen() {
+  push(); textAlign(CENTER, CENTER);
+  fill('#E0C097'); textSize(24); text("Ādi Tāḷa Rhythm Engine", width / 2, height / 2 - 20);
+  textSize(14); fill(120); text("Tap anywhere to begin", width / 2, height / 2 + 30); pop();
+}
+
+function drawHeader(vState) {
+  push(); textAlign(CENTER, TOP);
+  fill('#E0C097'); textSize(28); text("ĀDI TĀḶA", width / 2, isShortScreen ? 15 : 20);
+  
+  fill(120); textSize(12);
+  let sub = '';
+  if (appMode === 'phrase') {
+    const exerciseRuntime = getPlayableExerciseRuntime();
+    const exercisePreview = getSelectedExercisePreview();
+    if (exerciseRuntime) {
+      sub = `${exerciseRuntime.pattern.id} · ${exerciseRuntime.cell.id} · Window ${vState.cycleIndex + 1}/${exerciseRuntime.fullCycleWindows} · phrase ${exerciseRuntime.phraseUnits}u`;
+    } else if (isExercisePreviewPanelOpen && exercisePreview) {
+      sub = `${exercisePreview.pattern.id} preview only · full-cycle windows pending or unresolved`;
+    } else {
+      sub = `Takadimi Scale: L${currentPhraseScale} (×${phraseMultiplier}) - Resolves on Beat 8`;
+    }
+  } else {
+    const cycleInfo = getCrossCycleInfo();
+    const totalWindows = Math.ceil(cycleInfo.fullCycleBeats / 8);
+    const currentWin = isPlaying ? vState.cycleIndex + 1 : 1;
+    sub = `Gati ${currentGati} vs Jathi ${currentJathi} · Window ${currentWin}/${totalWindows} (Beats ${vState.cycleIndex * 8 + 1}-${Math.min((vState.cycleIndex + 1) * 8, cycleInfo.fullCycleBeats)})`;
+  }
+  text(sub, width / 2, isShortScreen ? 45 : 60);
+
+  Object.values(modeBtns).forEach(btn => {
+    let active = (appMode === btn.mode);
+    stroke(active ? '#5BC0BE' : '#333');
+    fill(active ? 'rgba(91,192,190,0.1)' : 'transparent');
+    rect(btn.x, btn.y, btn.w, btn.h, 15); 
+    
+    noStroke(); fill(active ? '#5BC0BE' : '#888');
+    textAlign(CENTER, CENTER); textSize(12);
+    text(btn.label, btn.x + btn.w/2, btn.y + btn.h/2);
+  });
+  pop();
+}
+
+function drawGlobalProgressBar(vState) {
+  if (!isPlaying) return;
+  
+  let cycleTicks = 0;
+  if (appMode === 'phrase') {
+    const exerciseRuntime = getPlayableExerciseRuntime();
+    cycleTicks = exerciseRuntime
+      ? (exerciseRuntime.horizonUnits / exerciseRuntime.unitsPerBeat) * Tone.Transport.PPQ
+      : TALA_BEATS * Tone.Transport.PPQ;
+  } else {
+    cycleTicks = getCrossCycleInfo().fullCycleBeats * Tone.Transport.PPQ;
+  }
+  let progress = (vState.ticks % cycleTicks) / cycleTicks;
+  
+  push(); noStroke();
+  fill('#1E1E22'); rect(0, 0, width, 4);
+  fill('#5BC0BE'); rect(0, 0, width * progress, 4);
+  pop();
+}
+
+function drawRhythmGrid(vState) {
+  push();
+  let maxGridW = min(width * 0.9, 1000);
+  let cardH = constrain(height * 0.18, 90, 140);
+  let gap = isMobile ? 8 : 12;
+  let groupGap = isMobile ? 16 : 24;
+  let startY = height / 2 - (isMobile ? cardH + gap : cardH / 2) - (isShortScreen ? 10 : 20);
+  
+  if (isMobile) {
+    let topW = maxGridW; let cardW = (topW - gap * 3) / 4;
+    drawBeatGroup(0, 4, width/2 - topW/2, startY, cardW, cardH, gap, vState);
+    let bottomW = cardW * 4 + gap * 2 + groupGap; 
+    let bStartX = width/2 - bottomW/2;
+    drawBeatGroup(4, 2, bStartX, startY + cardH + gap * 2, cardW, cardH, gap, vState);
+    drawBeatGroup(6, 2, bStartX + cardW * 2 + gap + groupGap, startY + cardH + gap * 2, cardW, cardH, gap, vState);
+  } else {
+    let cardW = (maxGridW - gap * 5 - groupGap * 2) / 8;
+    let cx = width/2 - maxGridW/2;
+    cx = drawBeatGroup(0, 4, cx, startY, cardW, cardH, gap, vState);
+    cx += groupGap - gap;
+    cx = drawBeatGroup(4, 2, cx, startY, cardW, cardH, gap, vState);
+    cx += groupGap - gap;
+    drawBeatGroup(6, 2, cx, startY, cardW, cardH, gap, vState);
+  }
+  pop();
+}
+
+function drawBeatGroup(startIndex, count, startX, y, w, h, gap, vState) {
+  let cx = startX;
+  for (let i = 0; i < count; i++) {
+    drawBeatCard(startIndex + i, cx, y, w, h, vState);
+    cx += w + gap;
+  }
+  return cx;
+}
+
+function drawBeatCard(index, x, y, w, h, vState) {
+  let bData = beatData[index];
+  let bGlow = beatGlows[index];
+  
+  let isCurrentBeat = (isPlaying && vState.beatIndex === index);
+  let beatProgress = isCurrentBeat ? vState.beatProgress : 0;
+  
+  fill(isCurrentBeat && beatProgress > 0 ? '#26262A' : '#1E1E22');
+  stroke(isCurrentBeat && beatProgress > 0 ? '#3A3A40' : '#2A2A30');
+  strokeWeight(2);
+  
+  if (bData.type === 'samam') stroke(`rgba(91, 192, 190, ${0.4 + bGlow * 0.6})`);
+  else if (bData.type === 'sub-accent') stroke(`rgba(224, 192, 151, ${0.2 + bGlow * 0.4})`);
+  
+  rect(x, y, w, h, 8);
+  
+  noStroke();
+  fill(bData.type === 'samam' ? '#5BC0BE' : '#E0C097');
+  textAlign(LEFT, TOP); textSize(isMobile ? 16 : 20); text(index + 1, x + 8, y + 8);
+  textAlign(RIGHT, TOP); textSize(isMobile ? 9 : 11); fill(120); text(bData.gesture, x + w - 8, y + 10);
+
+  if (appMode === 'phrase') {
+    const exerciseRuntime = getPlayableExerciseRuntime();
+    if (exerciseRuntime) drawExerciseOverlay(index, x, y, w, h, vState, exerciseRuntime);
+    else drawPhraseOverlay(index, x, y, w, h, vState);
+  } else {
+    drawCrossGatiLayer(index, x, y, w, h, vState);
+    drawCrossJathiLayer(index, x, y, w, h, vState); 
+  }
+
+  if (beatProgress > 0) {
+    fill('#5BC0BE'); rect(x + 8, y + h - 8, (w - 16) * beatProgress, 3, 2);
+  } else {
+    fill('#2A2A30'); rect(x + 8, y + h - 8, w - 16, 3, 2);
+  }
+}
+
+function drawPhraseOverlay(index, x, y, w, h, vState) {
+  let overlayCount = phraseMultiplier;
+  let overlayW = (w - 16) / overlayCount;
+  let overlayY = y + h / 2 - 9; 
+  
+  let startOffsetSteps = (TALA_BEATS - currentPhraseScale) * phraseMultiplier;
+  let currentScaleArr = getPhraseScaleUnits(currentPhraseScale);
+
+  for (let s = 0; s < overlayCount; s++) {
+    let globalStep = index * overlayCount + s;
+    let isCurrent = (vState.globalStep === globalStep);
+    let glow = stepGlows[globalStep] || 0;
+
+    if (globalStep < startOffsetSteps) {
+      fill(isCurrent ? 'rgba(224, 192, 151, 0.2)' : 'rgba(42, 42, 48, 0.3)');
+      noStroke();
+      rect(x + 8 + s * overlayW, overlayY, overlayW - 2, 18, 4);
+    } else {
+      let phraseLocalIndex = globalStep - startOffsetSteps;
+      let txt = currentScaleArr[phraseLocalIndex % currentScaleArr.length];
+      let isAccent = isPhraseAccent(phraseLocalIndex, currentPhraseScale);
+
+      if (isCurrent && isAccent) fill('#E07A5F'); 
+      else if (isAccent) fill('rgba(224,122,95,0.45)'); 
+      else if (isCurrent) fill('#5BC0BE'); 
+      else fill(`rgba(91,192,190,${0.12 + glow * 0.45})`);
+
+      noStroke();
+      rect(x + 8 + s * overlayW, overlayY, overlayW - 2, 18, 4);
+
+      if (isCurrent) fill('#121214'); 
+      else if (isAccent) fill('#F2A65A'); 
+      else fill('#9ad9d8');
+
+      textAlign(CENTER, CENTER);
+      textSize(overlayCount <= 2 ? 11 : (overlayCount === 3 ? 9 : 8));
+
+      let displayTxt = isAccent ? txt.charAt(0).toUpperCase() + txt.slice(1) : txt;
+      text(displayTxt, x + 8 + s * overlayW + (overlayW - 2)/2, overlayY + 9);
+    }
+  }
+}
+
+function drawExerciseOverlay(index, x, y, w, h, vState, runtime) {
+  const windowStartUnit = vState.cycleIndex * runtime.windowUnits;
+  const beatStartUnit = windowStartUnit + index * runtime.unitsPerBeat;
+  const beatEndUnit = beatStartUnit + runtime.unitsPerBeat;
+  const overlayY = y + h / 2 - 9;
+  const overlayH = 18;
+  const innerX = x + 8;
+  const innerW = w - 16;
+
+  runtime.events.forEach((event, eventIndex) => {
+    if (event.endUnit <= beatStartUnit || event.startUnit >= beatEndUnit) return;
+
+    const overlapStart = Math.max(beatStartUnit, event.startUnit);
+    const overlapEnd = Math.min(beatEndUnit, event.endUnit);
+    const segX = innerX + ((overlapStart - beatStartUnit) / runtime.unitsPerBeat) * innerW;
+    const segW = Math.max(4, ((overlapEnd - overlapStart) / runtime.unitsPerBeat) * innerW - 2);
+    const isCurrent = vState.globalStep >= event.startUnit && vState.globalStep < event.endUnit;
+    const glow = exerciseEventGlows[eventIndex] || 0;
+
+    if (event.isTail) {
+      fill(isCurrent ? 'rgba(224, 192, 151, 0.24)' : `rgba(70, 70, 78, ${0.25 + glow * 0.18})`);
+    } else if (isCurrent && event.isAccent) {
+      fill('#E07A5F');
+    } else if (event.isAccent) {
+      fill('rgba(224,122,95,0.45)');
+    } else if (isCurrent) {
+      fill('#5BC0BE');
+    } else {
+      fill(`rgba(91,192,190,${0.12 + glow * 0.45})`);
+    }
+
+    noStroke();
+    rect(segX, overlayY, segW, overlayH, 4);
+
+    if (event.text && overlapStart === event.startUnit && segW > 18) {
+      if (isCurrent) fill('#121214');
+      else if (event.isAccent) fill('#F2A65A');
+      else fill('#9ad9d8');
+
+      textAlign(CENTER, CENTER);
+      textSize(segW > 42 ? 11 : 8);
+      text(event.text, segX + segW / 2, overlayY + 9);
+    }
+  });
+}
+
+function drawCrossGatiLayer(index, x, y, w, h, vState) {
+  let subW = (w - 16) / currentGati;
+  let subY = y + 35; 
+  
+  for (let s = 0; s < currentGati; s++) {
+    let globalMatra = (vState.cycleIndex * TALA_BEATS + index) * currentGati + s;
+    let isCurrent = (vState.globalStep === globalMatra);
+    let sGlow = stepGlows[globalMatra] || 0;
+
+    fill(isCurrent ? '#E0C097' : `rgba(224, 192, 151, ${0.05 + sGlow * 0.15})`);
+    noStroke(); rect(x + 8 + s * subW, subY, subW - 2, 16, 3);
+
+    fill(isCurrent ? '#121214' : '#666');
+    textAlign(CENTER, CENTER); textSize(8);
+    text((s + 1).toString(), x + 8 + s * subW + (subW - 2)/2, subY + 8);
+  }
+}
+
+function drawCrossJathiLayer(index, x, y, w, h, vState) {
+  let matraW = (w - 16) / currentGati;
+  let beatStartMatra = (vState.cycleIndex * TALA_BEATS + index) * currentGati;
+  let beatEndMatra = beatStartMatra + currentGati;
+  
+  let jY = y + h - 55; 
+  
+  stroke('#2A2A30'); strokeWeight(1);
+  line(x + 8, jY + 12, x + w - 8, jY + 12);
+  
+  let firstJathiStart = Math.floor(beatStartMatra / currentJathi) * currentJathi;
+  for (let jStart = firstJathiStart; jStart < beatEndMatra; jStart += currentJathi) {
+    let startMatraInBeat = Math.max(0, jStart - beatStartMatra);
+    let endMatraInBeat = Math.min(currentGati, jStart + currentJathi - beatStartMatra);
+    
+    if (startMatraInBeat < endMatraInBeat) {
+      let jX = x + 8 + startMatraInBeat * matraW;
+      let jW = (endMatraInBeat - startMatraInBeat) * matraW;
+      let isCurrentGroup = (Math.floor(vState.globalStep / currentJathi) * currentJathi === jStart);
+      
+      fill(isCurrentGroup ? 'rgba(226, 122, 95, 0.15)' : 'rgba(91, 192, 190, 0.08)');
+      noStroke();
+      
+      let tl = (jStart === beatStartMatra + startMatraInBeat) ? 6 : 0;
+      let tr = (jStart + currentJathi === beatStartMatra + endMatraInBeat) ? 6 : 0;
+      rect(jX, jY, jW - 1, 24, tl, tr, tr, tl);
+    }
+  }
+
+  for (let s = 0; s < currentGati; s++) {
+    let globalMatra = beatStartMatra + s;
+    let jathiIndex = globalMatra % currentJathi;
+    let isJathiAccent = (jathiIndex === 0);
+    let isCurrent = (vState.globalStep === globalMatra);
+    let hGlow = isJathiAccent ? (jathiHitGlows[globalMatra] || 0) : 0;
+    
+    let sX = x + 8 + s * matraW + matraW / 2;
+    let txt = getJathiUnits(currentJathi)[jathiIndex];
+    if (isJathiAccent) txt = txt.charAt(0).toUpperCase() + txt.slice(1);
+    
+    if (isJathiAccent) {
+      drawingContext.shadowBlur = (isCurrent ? 15 : 0) + hGlow * 15;
+      drawingContext.shadowColor = '#F2A65A';
+      fill(isCurrent ? '#F2A65A' : (hGlow > 0.1 ? '#F2A65A' : '#E07A5F'));
+      noStroke(); circle(sX, jY + 12, isCurrent ? 18 : 14 + hGlow * 4);
+      drawingContext.shadowBlur = 0;
+      
+      fill('#121214'); textAlign(CENTER, CENTER); textSize(10);
+      text(txt.charAt(0), sX, jY + 12);
+    } else {
+      fill(isCurrent ? '#5BC0BE' : '#9ad9d8');
+      textAlign(CENTER, CENTER); textSize(10);
+      text(txt, sX, jY + 12);
+    }
+  }
+}
+
+function drawControls() {
+  push();
+  drawPhraseExercisePanel();
+  drawExercisePatternPreview();
+  if (appMode !== 'phrase' || phrasePanelContentAlpha > 0.03) {
+    drawingContext.globalAlpha = appMode === 'phrase' ? phrasePanelContentAlpha : 1;
+    paramBtns.forEach(btn => {
+      let isActive = false;
+      if (btn.type === 'phraseMult') isActive = (phraseMultiplier === btn.val);
+      if (btn.type === 'phraseScale') isActive = (currentPhraseScale === btn.val);
+      if (btn.type === 'gati') isActive = (currentGati === btn.val);
+      if (btn.type === 'jathi') isActive = (currentJathi === btn.val);
+      
+      stroke(btn.disabled ? '#222' : (isActive ? '#5BC0BE' : '#444'));
+      fill(btn.disabled ? 'transparent' : (isActive ? 'rgba(91, 192, 190, 0.2)' : '#1E1E22'));
+      rect(btn.x, btn.y, btn.w, btn.h, 4);
+      
+      noStroke(); fill(btn.disabled ? '#333' : (isActive ? '#5BC0BE' : '#E0C097'));
+      textAlign(CENTER, CENTER); textSize(11);
+      text(btn.label, btn.x + btn.w/2, btn.y + btn.h/2);
+    });
+    drawingContext.globalAlpha = 1;
+  }
+
+  audioBtnsLayout.forEach(btn => {
+    let mode = btn.get();
+    let col = mode === 'off' ? '#444' : (mode === 'soft' ? '#E0C097' : '#5BC0BE');
+    let bg = mode === 'off' ? 'transparent' : (mode === 'soft' ? 'rgba(224, 192, 151, 0.1)' : 'rgba(91, 192, 190, 0.2)');
+    
+    stroke(col); fill(bg);
+    rect(btn.x, btn.y, btn.w, btn.h, 4);
+    
+    noStroke(); fill(col);
+    textAlign(CENTER, CENTER); textSize(10);
+    text(`${btn.label}:${mode.toUpperCase()}`, btn.x + btn.w/2, btn.y + btn.h/2);
+  });
+
+  fill('#2A2A30'); noStroke(); rect(slider.x, slider.y, slider.w, slider.h, 4);
+  let progressX = map(currentBPM, 40, 180, 0, slider.w);
+  fill('#E0C097'); rect(slider.x, slider.y, progressX, slider.h, 4);
+  fill(slider.dragging ? '#FFFFFF' : '#E0C097');
+  circle(slider.x + progressX, slider.y + slider.h/2, slider.handleR * 2);
+  
+  textAlign(CENTER, TOP); textSize(12); fill('#888');
+  text(`BPM: ${Math.round(currentBPM)}`, width / 2, slider.y + 12);
+
+  [btns.play, btns.reset].forEach(btn => {
+    stroke('#E0C097'); fill('transparent');
+    rect(btn.x, btn.y, btn.w, btn.h, 8);
+    noStroke(); fill('#E0C097');
+    textAlign(CENTER, CENTER); textSize(14);
+    text(btn.label(), btn.x + btn.w/2, btn.y + btn.h/2);
+  });
+  pop();
+}
+
+function drawPhraseExercisePanel() {
+  if (appMode !== 'phrase' || !phraseExercisePanel) return;
+
+  stroke('#2A2A30');
+  fill('rgba(30, 30, 34, 0.88)');
+  const displayH = phraseExercisePanel.headerH + (phraseExercisePanel.fullH - phraseExercisePanel.headerH) * phrasePanelContentAlpha;
+  rect(phraseExercisePanel.x, phraseExercisePanel.y, phraseExercisePanel.w, displayH, 10);
+
+  noStroke();
+  fill('#E0C097');
+  textAlign(LEFT, TOP);
+  textSize(11);
+  text('EXERCISE_01', phraseExercisePanel.x + 12, phraseExercisePanel.y + 10);
+
+  textAlign(RIGHT, TOP);
+  fill(isPhraseExercisePanelOpen ? '#5BC0BE' : '#888');
+  text(isPhraseExercisePanelOpen ? 'OPEN' : 'CLOSED', phraseExercisePanel.x + phraseExercisePanel.w - 12, phraseExercisePanel.y + 10);
+}
+
+function drawExercisePatternPreview() {
+  if (appMode !== 'phrase' || !exercisePreviewPanel) return;
+
+  const preview = getSelectedExercisePreview();
+  const panel = exercisePreviewPanel;
+
+  stroke('#2A2A30');
+  fill('rgba(30, 30, 34, 0.88)');
+  const displayH = panel.headerH + (panel.fullH - panel.headerH) * exercisePanelContentAlpha;
+  rect(panel.x, panel.y, panel.w, displayH, 10);
+
+  noStroke();
+  fill('#E0C097');
+  textAlign(LEFT, TOP);
+  textSize(11);
+  text('EXERCISE_02', panel.x + 12, panel.y + 10);
+
+  textAlign(RIGHT, TOP);
+  fill(isExercisePreviewPanelOpen ? '#5BC0BE' : '#888');
+  text(isExercisePreviewPanelOpen ? 'OPEN' : 'CLOSED', panel.x + panel.w - 12, panel.y + 10);
+
+  if (exercisePanelContentAlpha <= 0.03) return;
+
+  drawingContext.globalAlpha = exercisePanelContentAlpha;
+
+  fill('#666');
+  textSize(9);
+  text('Exact aligned patterns play live here. Exercise_01 remains the legacy phrase path.', panel.x + 12, panel.infoTop);
+
+  if (preview) {
+    const endingMode = preview.ending?.mode ?? 'unknown';
+    const tailText = preview.tailUnits === null ? 'tail ?' : `tail ${preview.tailUnits}u`;
+    const windowText = isPositiveInteger(preview.pattern.fullCycleWindows) ? `${preview.pattern.fullCycleWindows} windows` : 'windows ?';
+    const detailLine = `${preview.cell.id} · ${preview.pattern.ladder.join('-')} · phrase ${preview.pattern.phraseUnits ?? '?'}u · ${windowText}`;
+    const noteLine = `${preview.cell.spoken} · ${endingMode} · ${tailText}`;
+
+    fill('#9ad9d8');
+    textSize(isMobile ? 9 : 10);
+    text(`${preview.pattern.id} · ${detailLine}`, panel.x + 12, panel.infoTop + 14);
+
+    fill('#888');
+    textSize(isMobile ? 8 : 9);
+    text(noteLine, panel.x + 12, panel.infoTop + 28);
+  }
+
+  exercisePatternBtns.forEach((btn) => {
+    const isActive = btn.id === selectedExercisePatternId;
+    stroke(isActive ? '#5BC0BE' : '#3A3A40');
+    fill(isActive ? 'rgba(91, 192, 190, 0.18)' : 'rgba(18, 18, 20, 0.75)');
+    rect(btn.x, btn.y, btn.w, btn.h, 4);
+
+    noStroke();
+    fill(isActive ? '#5BC0BE' : '#E0C097');
+    textAlign(CENTER, CENTER);
+    textSize(10);
+    text(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+  });
+  drawingContext.globalAlpha = 1;
+}
+
+// ==========================================
+// UNBLOCKED HYBRID INPUT HANDLING
+// ==========================================
+async function handleGesture(x, y) {
+  const wasNotStarted = !isStarted;
+
+  if (wasNotStarted) {
+    isStarted = true;
+    return; 
+  }
+
+  await handleInput(x, y);
+}
+
+async function handleInput(x, y) {
+  if (isInside(x, y, btns.play)) { await togglePlay(); return; }
+  
+  if (isInside(x, y, btns.reset)) { resetTransport(); return; }
+  
+  for (let btn of Object.values(modeBtns)) { 
+    if (isInside(x, y, btn)) { changeMode(btn.mode); return; }
+  }
+
+  if (appMode === 'phrase' && phraseExercisePanel) {
+    const headerRect = {
+      x: phraseExercisePanel.x,
+      y: phraseExercisePanel.y,
+      w: phraseExercisePanel.w,
+      h: phraseExercisePanel.headerH ?? phraseExercisePanel.h
+    };
+
+    if (isInside(x, y, headerRect)) {
+      const nextOpen = !isPhraseExercisePanelOpen;
+      isPhraseExercisePanelOpen = nextOpen;
+      if (nextOpen) isExercisePreviewPanelOpen = false;
+      updateLayout();
+      triggerScheduleUpdate();
+      return;
+    }
+  }
+
+  if (appMode === 'phrase' && exercisePreviewPanel) {
+    const headerRect = {
+      x: exercisePreviewPanel.x,
+      y: exercisePreviewPanel.y,
+      w: exercisePreviewPanel.w,
+      h: exercisePreviewPanel.headerH ?? exercisePreviewPanel.h
+    };
+
+    if (isInside(x, y, headerRect)) {
+      const nextOpen = !isExercisePreviewPanelOpen;
+      isExercisePreviewPanelOpen = nextOpen;
+      if (nextOpen) isPhraseExercisePanelOpen = false;
+      updateLayout();
+      triggerScheduleUpdate();
+      return;
+    }
+  }
+
+  if (appMode === 'phrase') {
+    for (let btn of exercisePatternBtns) {
+      if (isInside(x, y, btn)) {
+        selectedExercisePatternId = btn.id;
+        isExercisePreviewPanelOpen = true;
+        isPhraseExercisePanelOpen = false;
+        updateLayout();
+        triggerScheduleUpdate();
+        return;
+      }
+    }
+  }
+
+  if (appMode !== 'phrase' || isPhraseExercisePanelOpen) {
+    for (let btn of paramBtns) {
+      if (!btn.disabled && isInside(x, y, btn)) {
+        if (btn.type === 'phraseMult') changeMultiplier(btn.val);
+        else if (btn.type === 'phraseScale') changePhraseScale(btn.val);
+        else if (btn.type === 'gati') changeCrossParams(btn.val, currentJathi);
+        else if (btn.type === 'jathi') changeCrossParams(currentGati, btn.val);
+        return;
+      }
+    }
+  }
+
+  for (let btn of audioBtnsLayout) {
+    if (isInside(x, y, btn)) {
+      btn.set(nextAudioState(btn.get()));
+      applyAudioModes(); 
+      return;
+    }
+  }
+  
+  let hx = slider.x + map(currentBPM, 40, 180, 0, slider.w);
+  let hy = slider.y + slider.h/2;
+  if (dist(x, y, hx, hy) < 30 || (x > slider.x && x < slider.x + slider.w && y > slider.y - 20 && y < slider.y + 20)) {
+    slider.dragging = true; updateBPM(x);
+  }
+}
+
+function updateBPM(x) {
+  let constrainedX = constrain(x, slider.x, slider.x + slider.w);
+  currentBPM = map(constrainedX, slider.x, slider.x + slider.w, 40, 180);
+  Tone.Transport.bpm.rampTo(currentBPM, 0.1);
+}
+
+async function togglePlay() { 
+  try {
+    if (!audioInitialized) {
+      await initAudioIfNeeded();
+    }
+
+    if (!isPlaying && scheduleDirty) {
+      applyRhythmSchedule();
+      scheduleDirty = false;
+    }
+
+    if (isPlaying) {
+      Tone.Transport.pause();
+    } else {
+      Tone.Transport.start();
+    }
+    
+    isPlaying = !isPlaying;
+  } catch (e) {
+    console.error('togglePlay failed:', e);
+  }
+}
+
+function resetTransport() {
+  Tone.Transport.stop(); Tone.Transport.position = "0:0:0";
+  isPlaying = false; 
+  resetStepCounters(); 
+  stepGlows.fill(0); beatGlows.fill(0); jathiHitGlows.fill(0); exerciseEventGlows.fill(0);
+  scheduleDirty = true;
+}
+
+function changeMode(newMode) {
+  if (appMode === newMode) return;
+  appMode = newMode;
+  updateLayout(); 
+  triggerScheduleUpdate();
+}
+
+function changeMultiplier(newMult) {
+  if (phraseMultiplier === newMult) return;
+  phraseMultiplier = newMult;
+  updateLayout();
+  triggerScheduleUpdate();
+}
+
+// [FIX] Phrase scale changes made into soft updates
+function changePhraseScale(newScale) {
+  if (currentPhraseScale === newScale) return;
+  currentPhraseScale = newScale;
+  updateLayout();
+  
+  // Soften obsolete glow artifacts directly without hard resetting the transport
+  for (let i = 0; i < stepGlows.length; i++) {
+    stepGlows[i] *= 0.3;
+  }
+}
+
+function changeCrossParams(newGati, newJathi) {
+  currentGati = newGati; 
+  currentJathi = newJathi; 
+  updateLayout();
+  triggerScheduleUpdate();
+}
+
+function triggerScheduleUpdate() {
+  if (!audioInitialized) {
+    scheduleDirty = true;
+    return;
+  }
+
+  let wasPlaying = isPlaying;
+  Tone.Transport.stop(); Tone.Transport.position = "0:0:0";
+  Tone.Transport.cancel(0); 
+  resetStepCounters(); 
+  applyRhythmSchedule();
+  scheduleDirty = false;
+  if (wasPlaying) Tone.Transport.start();
+}
+
+function isInside(x, y, rectObj) {
+  return x > rectObj.x && x < rectObj.x + rectObj.w && y > rectObj.y && y < rectObj.y + rectObj.h;
+}
+</script>
+</body>
+</html>
