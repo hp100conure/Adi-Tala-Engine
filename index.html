@@ -482,6 +482,7 @@ let phraseStepCounter = 0;
 let crossStepCounter = 0;
 
 let transportEventId = null;
+let scheduleGeneration = 0;
 let stepGlows = []; 
 let beatGlows = new Array(TALA_BEATS).fill(0);
 let jathiHitGlows = []; 
@@ -729,34 +730,55 @@ function getCurrentVisualState() {
 // ==========================================
 // SCHEDULING LOGIC
 // ==========================================
+function clearVisualGlows() {
+  stepGlows = new Array(stepGlows.length).fill(0);
+  beatGlows = new Array(TALA_BEATS).fill(0);
+  jathiHitGlows = new Array(jathiHitGlows.length).fill(0);
+  exerciseEventGlows = new Array(exerciseEventGlows.length).fill(0);
+}
+
+function getNextScheduledIndex(startTicks, ticksPerStep, totalSteps) {
+  if (!Number.isFinite(startTicks) || ticksPerStep <= 0 || totalSteps <= 0) return 0;
+
+  const normalizedTicks = Math.max(0, Math.floor(startTicks));
+  const baseIndex = Math.floor(normalizedTicks / ticksPerStep);
+  const onBoundary = normalizedTicks % ticksPerStep === 0;
+  const nextIndex = onBoundary ? baseIndex : baseIndex + 1;
+  return nextIndex % totalSteps;
+}
+
 function resetStepCounters() {
   phraseStepCounter = 0;
   crossStepCounter = 0;
   exerciseStepCounter = 0;
 }
 
-function applyRhythmSchedule() {
+function applyRhythmSchedule(startTicks = 0) {
   if (transportEventId !== null) Tone.Transport.clear(transportEventId);
+  scheduleGeneration++;
   applyAudioModes(); 
   
   if (appMode === 'phrase') {
     const exerciseRuntime = getPlayableExerciseRuntime();
-    if (exerciseRuntime) applyExerciseSchedule(exerciseRuntime);
-    else applyPhraseSchedule();
+    if (exerciseRuntime) applyExerciseSchedule(exerciseRuntime, scheduleGeneration, startTicks);
+    else applyPhraseSchedule(scheduleGeneration, startTicks);
   }
-  else applyCrossSchedule();
+  else applyCrossSchedule(scheduleGeneration, startTicks);
 
   scheduleDirty = false;
 }
 
-function applyPhraseSchedule() {
+function applyPhraseSchedule(generation, startTicks = 0) {
   const totalCycleSteps = TALA_BEATS * phraseMultiplier;
   
   stepGlows = new Array(totalCycleSteps).fill(0);
+  beatGlows = new Array(TALA_BEATS).fill(0);
+  jathiHitGlows = [];
   exerciseEventGlows = [];
   phraseStepCounter = 0; 
 
   const ticksPerStep = Math.floor(Tone.Transport.PPQ / phraseMultiplier);
+  phraseStepCounter = getNextScheduledIndex(startTicks, ticksPerStep, totalCycleSteps);
 
   transportEventId = Tone.Transport.scheduleRepeat((time) => {
     const globalStep = phraseStepCounter % totalCycleSteps;
@@ -784,6 +806,7 @@ function applyPhraseSchedule() {
     }
 
     Tone.Draw.schedule(() => {
+      if (generation !== scheduleGeneration) return;
       stepGlows[globalStep] = 1.0;
       if (phraseSubIndex === 0) beatGlows[beatIndex] = 1.0;
     }, time);
@@ -791,13 +814,15 @@ function applyPhraseSchedule() {
   }, ticksPerStep + "i");
 }
 
-function applyExerciseSchedule(runtime) {
+function applyExerciseSchedule(runtime, generation, startTicks = 0) {
   const totalCycleUnits = runtime.horizonUnits;
   const ticksPerUnit = Math.floor(Tone.Transport.PPQ / runtime.unitsPerBeat);
 
   stepGlows = new Array(totalCycleUnits).fill(0);
+  beatGlows = new Array(TALA_BEATS).fill(0);
+  jathiHitGlows = [];
   exerciseEventGlows = new Array(runtime.events.length).fill(0);
-  exerciseStepCounter = 0;
+  exerciseStepCounter = getNextScheduledIndex(startTicks, ticksPerUnit, totalCycleUnits);
 
   transportEventId = Tone.Transport.scheduleRepeat((time) => {
     const globalUnit = exerciseStepCounter % totalCycleUnits;
@@ -824,27 +849,31 @@ function applyExerciseSchedule(runtime) {
       }
 
       Tone.Draw.schedule(() => {
+        if (generation !== scheduleGeneration) return;
         exerciseEventGlows[eventIndex] = 1.0;
       }, time);
     }
 
     Tone.Draw.schedule(() => {
+      if (generation !== scheduleGeneration) return;
       stepGlows[globalUnit] = 1.0;
       if (unitInBeat === 0) beatGlows[beatIndex] = 1.0;
     }, time);
   }, ticksPerUnit + "i");
 }
 
-function applyCrossSchedule() {
+function applyCrossSchedule(generation, startTicks = 0) {
   const cycleInfo = getCrossCycleInfo();
   const totalSteps = cycleInfo.totalSteps;
 
   stepGlows = new Array(totalSteps).fill(0);
+  beatGlows = new Array(TALA_BEATS).fill(0);
   jathiHitGlows = new Array(totalSteps).fill(0);
   exerciseEventGlows = [];
   crossStepCounter = 0; 
   
   const ticksPerMatra = Math.floor(Tone.Transport.PPQ / currentGati);
+  crossStepCounter = getNextScheduledIndex(startTicks, ticksPerMatra, totalSteps);
 
   transportEventId = Tone.Transport.scheduleRepeat((time) => {
     const globalMatra = crossStepCounter % totalSteps;
@@ -869,6 +898,7 @@ function applyCrossSchedule() {
     }
 
     Tone.Draw.schedule(() => {
+      if (generation !== scheduleGeneration) return;
       stepGlows[globalMatra] = 1.0;
       if (subIndex === 0) beatGlows[beatIndex] = 1.0;
       if (isJathiHit) jathiHitGlows[globalMatra] = 1.0;
@@ -1712,9 +1742,11 @@ async function togglePlay() {
 
 function resetTransport() {
   Tone.Transport.stop(); Tone.Transport.position = "0:0:0";
+  Tone.Transport.cancel(0);
+  scheduleGeneration++;
   isPlaying = false; 
   resetStepCounters(); 
-  stepGlows.fill(0); beatGlows.fill(0); jathiHitGlows.fill(0); exerciseEventGlows.fill(0);
+  clearVisualGlows();
   scheduleDirty = true;
 }
 
@@ -1742,6 +1774,15 @@ function changePhraseScale(newScale) {
   for (let i = 0; i < stepGlows.length; i++) {
     stepGlows[i] *= 0.3;
   }
+  for (let i = 0; i < beatGlows.length; i++) {
+    beatGlows[i] *= 0.3;
+  }
+  for (let i = 0; i < jathiHitGlows.length; i++) {
+    jathiHitGlows[i] *= 0.3;
+  }
+  for (let i = 0; i < exerciseEventGlows.length; i++) {
+    exerciseEventGlows[i] *= 0.3;
+  }
 }
 
 function changeCrossParams(newGati, newJathi) {
@@ -1758,11 +1799,14 @@ function triggerScheduleUpdate() {
   }
 
   let wasPlaying = isPlaying;
+  const resumeTicks = wasPlaying ? Tone.Transport.ticks : 0;
   Tone.Transport.stop(); Tone.Transport.position = "0:0:0";
   Tone.Transport.cancel(0); 
   resetStepCounters(); 
-  applyRhythmSchedule();
+  clearVisualGlows();
+  applyRhythmSchedule(resumeTicks);
   scheduleDirty = false;
+  Tone.Transport.ticks = wasPlaying ? resumeTicks : 0;
   if (wasPlaying) Tone.Transport.start();
 }
 
