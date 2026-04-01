@@ -1274,8 +1274,7 @@ function drawBeatCard(index, x, y, w, h, vState) {
     if (exerciseRuntime) drawExerciseOverlay(index, x, y, w, h, vState, exerciseRuntime);
     else drawPhraseOverlay(index, x, y, w, h, vState);
   } else {
-    drawCrossGatiLayer(index, x, y, w, h, vState);
-    drawCrossJathiLayer(index, x, y, w, h, vState); 
+    drawCrossOverlay(index, x, y, w, h, vState);
   }
 
   if (beatProgress > 0) {
@@ -1374,74 +1373,47 @@ function drawExerciseOverlay(index, x, y, w, h, vState, runtime) {
   });
 }
 
-function drawCrossGatiLayer(index, x, y, w, h, vState) {
-  let subW = (w - 16) / currentGati;
-  let subY = y + 35; 
-  
-  for (let s = 0; s < currentGati; s++) {
-    let globalMatra = (vState.cycleIndex * TALA_BEATS + index) * currentGati + s;
-    let isCurrent = (vState.globalStep === globalMatra);
-    let sGlow = stepGlows[globalMatra] || 0;
+function drawCrossOverlay(index, x, y, w, h, vState) {
+  const overlayCount = currentGati;
+  const overlayW = (w - 16) / overlayCount;
+  const overlayY = y + h / 2 - 9;
+  const syllables = getJathiUnits(currentJathi);
 
-    fill(isCurrent ? '#E0C097' : `rgba(224, 192, 151, ${0.05 + sGlow * 0.15})`);
-    noStroke(); rect(x + 8 + s * subW, subY, subW - 2, 16, 3);
-  }
-}
+  for (let s = 0; s < overlayCount; s++) {
+    const globalMatra = (vState.cycleIndex * TALA_BEATS + index) * currentGati + s;
+    const jathiIndex = globalMatra % currentJathi;
+    const isJathiAccent = (jathiIndex === 0);
+    const isCurrent = (vState.globalStep === globalMatra);
+    const stepGlow = stepGlows[globalMatra] || 0;
+    const accentGlow = isJathiAccent ? (jathiHitGlows[globalMatra] || 0) : 0;
+    const boxX = x + 8 + s * overlayW;
+    const boxW = overlayW - 2;
 
-function drawCrossJathiLayer(index, x, y, w, h, vState) {
-  let matraW = (w - 16) / currentGati;
-  let beatStartMatra = (vState.cycleIndex * TALA_BEATS + index) * currentGati;
-  let beatEndMatra = beatStartMatra + currentGati;
-  
-  let jY = y + h - 55; 
-  
-  stroke('#2A2A30'); strokeWeight(1);
-  line(x + 8, jY + 12, x + w - 8, jY + 12);
-  
-  let firstJathiStart = Math.floor(beatStartMatra / currentJathi) * currentJathi;
-  for (let jStart = firstJathiStart; jStart < beatEndMatra; jStart += currentJathi) {
-    let startMatraInBeat = Math.max(0, jStart - beatStartMatra);
-    let endMatraInBeat = Math.min(currentGati, jStart + currentJathi - beatStartMatra);
-    
-    if (startMatraInBeat < endMatraInBeat) {
-      let jX = x + 8 + startMatraInBeat * matraW;
-      let jW = (endMatraInBeat - startMatraInBeat) * matraW;
-      let isCurrentGroup = (Math.floor(vState.globalStep / currentJathi) * currentJathi === jStart);
-      
-      fill(isCurrentGroup ? 'rgba(226, 122, 95, 0.15)' : 'rgba(91, 192, 190, 0.08)');
-      noStroke();
-      
-      let tl = (jStart === beatStartMatra + startMatraInBeat) ? 6 : 0;
-      let tr = (jStart + currentJathi === beatStartMatra + endMatraInBeat) ? 6 : 0;
-      rect(jX, jY, jW - 1, 24, tl, tr, tr, tl);
-    }
-  }
+    if (isCurrent && isJathiAccent) fill('#E07A5F');
+    else if (isJathiAccent) fill(`rgba(224,122,95,${0.3 + accentGlow * 0.35})`);
+    else if (isCurrent) fill('#5BC0BE');
+    else fill(`rgba(91,192,190,${0.12 + stepGlow * 0.45})`);
 
-  for (let s = 0; s < currentGati; s++) {
-    let globalMatra = beatStartMatra + s;
-    let jathiIndex = globalMatra % currentJathi;
-    let isJathiAccent = (jathiIndex === 0);
-    let isCurrent = (vState.globalStep === globalMatra);
-    let hGlow = isJathiAccent ? (jathiHitGlows[globalMatra] || 0) : 0;
-    
-    let sX = x + 8 + s * matraW + matraW / 2;
-    let txt = getJathiUnits(currentJathi)[jathiIndex];
-    if (isJathiAccent) txt = txt.charAt(0).toUpperCase() + txt.slice(1);
-    
-    if (isJathiAccent) {
-      drawingContext.shadowBlur = (isCurrent ? 15 : 0) + hGlow * 15;
+    if (isJathiAccent && (isCurrent || accentGlow > 0.08)) {
+      drawingContext.shadowBlur = (isCurrent ? 8 : 0) + accentGlow * 12;
       drawingContext.shadowColor = '#F2A65A';
-      fill(isCurrent ? '#F2A65A' : (hGlow > 0.1 ? '#F2A65A' : '#E07A5F'));
-      noStroke(); circle(sX, jY + 12, isCurrent ? 18 : 14 + hGlow * 4);
-      drawingContext.shadowBlur = 0;
-      
-      fill('#121214'); textAlign(CENTER, CENTER); textSize(10);
-      text(txt.charAt(0), sX, jY + 12);
-    } else {
-      fill(isCurrent ? '#5BC0BE' : '#9ad9d8');
-      textAlign(CENTER, CENTER); textSize(10);
-      text(txt, sX, jY + 12);
     }
+
+    noStroke();
+    rect(boxX, overlayY, boxW, 18, 4);
+    drawingContext.shadowBlur = 0;
+
+    let txt = syllables[jathiIndex] ?? '';
+    if (isJathiAccent) txt = txt.charAt(0).toUpperCase() + txt.slice(1);
+    const compactTxt = boxW < 22 ? txt.charAt(0) : txt;
+
+    if (isCurrent) fill('#121214');
+    else if (isJathiAccent) fill('#F2A65A');
+    else fill('#9ad9d8');
+
+    textAlign(CENTER, CENTER);
+    textSize(overlayCount <= 3 ? 11 : (overlayCount === 4 ? 9 : (overlayCount === 5 ? 8 : 7)));
+    text(compactTxt, boxX + boxW / 2, overlayY + 9);
   }
 }
 
