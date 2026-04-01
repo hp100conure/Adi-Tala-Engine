@@ -1375,8 +1375,10 @@ function drawExerciseOverlay(index, x, y, w, h, vState, runtime) {
 
 function drawCrossOverlay(index, x, y, w, h, vState) {
   const overlayCount = currentGati;
+  const innerX = x + 8;
+  const overlayH = isMobile ? 16 : 18;
+  const overlayY = Math.round(y + h / 2 - overlayH / 2);
   const overlayW = (w - 16) / overlayCount;
-  const overlayY = y + h / 2 - 9;
   const syllables = getJathiUnits(currentJathi);
 
   for (let s = 0; s < overlayCount; s++) {
@@ -1386,8 +1388,9 @@ function drawCrossOverlay(index, x, y, w, h, vState) {
     const isCurrent = (vState.globalStep === globalMatra);
     const stepGlow = stepGlows[globalMatra] || 0;
     const accentGlow = isJathiAccent ? (jathiHitGlows[globalMatra] || 0) : 0;
-    const boxX = x + 8 + s * overlayW;
-    const boxW = overlayW - 2;
+    const boxX = Math.round(innerX + s * overlayW);
+    const nextBoxX = Math.round(innerX + (s + 1) * overlayW);
+    const boxW = Math.max(4, nextBoxX - boxX - 2);
 
     if (isCurrent && isJathiAccent) fill('#E07A5F');
     else if (isJathiAccent) fill(`rgba(224,122,95,${0.24 + accentGlow * 0.22})`);
@@ -1395,11 +1398,11 @@ function drawCrossOverlay(index, x, y, w, h, vState) {
     else fill(`rgba(91,192,190,${0.12 + stepGlow * 0.4})`);
 
     noStroke();
-    rect(boxX, overlayY, boxW, 18, 4);
+    rect(boxX, overlayY, boxW, overlayH, 4);
 
     let txt = syllables[jathiIndex] ?? '';
     if (isJathiAccent) txt = txt.charAt(0).toUpperCase() + txt.slice(1);
-    const compactTxt = boxW < 20 ? txt.charAt(0) : txt;
+    const compactTxt = (isMobile || boxW < 22) ? txt.charAt(0) : txt;
 
     if (isCurrent) fill('#121214');
     else if (isJathiAccent) fill('#F2A65A');
@@ -1407,13 +1410,15 @@ function drawCrossOverlay(index, x, y, w, h, vState) {
 
     textAlign(CENTER, CENTER);
     textSize(
-      overlayCount <= 3 ? 11
-      : overlayCount === 4 ? 9
-      : overlayCount === 5 ? 8
-      : overlayCount === 7 ? 6
-      : 7
+      isMobile
+        ? (overlayCount <= 4 ? 8 : 7)
+        : overlayCount <= 3 ? 11
+        : overlayCount === 4 ? 9
+        : overlayCount === 5 ? 8
+        : overlayCount === 7 ? 6
+        : 7
     );
-    text(compactTxt, boxX + boxW / 2, overlayY + 9);
+    text(compactTxt, boxX + boxW / 2, overlayY + overlayH / 2 + 0.5);
   }
 }
 
