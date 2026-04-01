@@ -1390,29 +1390,29 @@ function drawCrossOverlay(index, x, y, w, h, vState) {
     const boxW = overlayW - 2;
 
     if (isCurrent && isJathiAccent) fill('#E07A5F');
-    else if (isJathiAccent) fill(`rgba(224,122,95,${0.3 + accentGlow * 0.35})`);
+    else if (isJathiAccent) fill(`rgba(224,122,95,${0.24 + accentGlow * 0.22})`);
     else if (isCurrent) fill('#5BC0BE');
-    else fill(`rgba(91,192,190,${0.12 + stepGlow * 0.45})`);
-
-    if (isJathiAccent && (isCurrent || accentGlow > 0.08)) {
-      drawingContext.shadowBlur = (isCurrent ? 8 : 0) + accentGlow * 12;
-      drawingContext.shadowColor = '#F2A65A';
-    }
+    else fill(`rgba(91,192,190,${0.12 + stepGlow * 0.4})`);
 
     noStroke();
     rect(boxX, overlayY, boxW, 18, 4);
-    drawingContext.shadowBlur = 0;
 
     let txt = syllables[jathiIndex] ?? '';
     if (isJathiAccent) txt = txt.charAt(0).toUpperCase() + txt.slice(1);
-    const compactTxt = boxW < 22 ? txt.charAt(0) : txt;
+    const compactTxt = boxW < 20 ? txt.charAt(0) : txt;
 
     if (isCurrent) fill('#121214');
     else if (isJathiAccent) fill('#F2A65A');
     else fill('#9ad9d8');
 
     textAlign(CENTER, CENTER);
-    textSize(overlayCount <= 3 ? 11 : (overlayCount === 4 ? 9 : (overlayCount === 5 ? 8 : 7)));
+    textSize(
+      overlayCount <= 3 ? 11
+      : overlayCount === 4 ? 9
+      : overlayCount === 5 ? 8
+      : overlayCount === 7 ? 6
+      : 7
+    );
     text(compactTxt, boxX + boxW / 2, overlayY + 9);
   }
 }
