@@ -15,9 +15,15 @@
       margin: 0; padding: 0;
       background-color: #121214;
       display: flex; justify-content: center; align-items: center;
-      height: 100vh; color: #E0C097;
+      width: 100vw; height: 100vh; height: 100dvh; color: #E0C097;
       font-family: 'Courier New', Courier, monospace;
       overflow: hidden; touch-action: none;
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      --safe-area-top: env(safe-area-inset-top, 0px);
+      --safe-area-bottom: env(safe-area-inset-bottom, 0px);
     }
     canvas { display: block; touch-action: none; }
   </style>
@@ -496,6 +502,7 @@ let topSynth, accentSynth, beatSynth, jathiSynth, phraseSynth;
 // --- UI METRICS ---
 let isMobile = false;
 let isShortScreen = false;
+let layoutProfile = {};
 let btns = {}; 
 let modeBtns = {};
 let paramBtns = [];
@@ -504,18 +511,107 @@ let exercisePatternBtns = [];
 let phraseExercisePanel = null;
 let exercisePreviewPanel = null;
 let slider = { x: 0, y: 0, w: 250, h: 6, handleR: 10, dragging: false };
+let controlPressFlash = { id: null, until: 0 };
 let selectedExercisePatternId = null;
 let isPhraseExercisePanelOpen = false;
 let isExercisePreviewPanelOpen = false;
 let phrasePanelContentAlpha = 0;
 let exercisePanelContentAlpha = 0;
 
+function parseCssPixels(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getSafeAreaInsets() {
+  const styles = getComputedStyle(document.body);
+  return {
+    top: parseCssPixels(styles.getPropertyValue('--safe-area-top')),
+    bottom: parseCssPixels(styles.getPropertyValue('--safe-area-bottom'))
+  };
+}
+
+function createLayoutProfile() {
+  const safe = getSafeAreaInsets();
+  const minSide = Math.min(width, height);
+  const maxSide = Math.max(width, height);
+  const portrait = height >= width;
+  const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+  const touch = coarsePointer || navigator.maxTouchPoints > 0;
+  const phone = touch && minSide < 700;
+  const tablet = touch && minSide >= 700 && maxSide <= 1400;
+  const compactHeight = height < 560;
+  const short = height < 750 || compactHeight;
+  const phoneLandscape = phone && !portrait;
+  const compactText = phone || width < 760 || compactHeight;
+  const gridTwoRows = (phone && portrait) || (tablet && portrait) || width < 600;
+  const bottomMargin = safe.bottom + (touch ? (compactHeight ? 8 : 14) : 18);
+  const topMargin = safe.top + (compactHeight ? 8 : 14);
+  const controlButtonH = touch ? (compactHeight ? 40 : 44) : 40;
+  const controlButtonW = phone ? (phoneLandscape ? 88 : 92) : (tablet ? 108 : 100);
+  const controlSpacing = phone ? 12 : 18;
+  const sliderGap = compactHeight ? 32 : (touch ? 40 : 45);
+  const audioGap = compactHeight ? 32 : (short ? 36 : 45);
+  const audioButtonW = phone ? 62 : (tablet ? 76 : 70);
+  const audioButtonH = touch ? 28 : 25;
+  const touchPad = touch ? (phone ? 14 : 12) : 4;
+  const titleY = topMargin + (compactHeight ? 0 : 6);
+  const subtitleY = titleY + (compactHeight ? 24 : 40);
+  const modeY = subtitleY + (compactHeight ? 18 : (phone ? 28 : 30));
+  const modeH = touch ? 32 : 30;
+  const panelGap = compactHeight ? 6 : (compactText ? 8 : 14);
+  const panelHeaderH = touch ? 32 : 32;
+  const panelMinStackH = panelHeaderH * 2 + panelGap;
+  const cardMinH = compactHeight ? 44 : (phone ? 64 : 76);
+  const cardMaxH = compactHeight ? 66 : (phone ? 96 : (tablet ? 120 : 140));
+
+  return {
+    safe,
+    touch,
+    phone,
+    tablet,
+    portrait,
+    compactHeight,
+    short,
+    compactText,
+    gridTwoRows,
+    bottomMargin,
+    topMargin,
+    controlButtonH,
+    controlButtonW,
+    controlSpacing,
+    sliderGap,
+    audioGap,
+    audioButtonW,
+    audioButtonH,
+    touchPad,
+    titleY,
+    subtitleY,
+    modeY,
+    modeH,
+    panelGap,
+    panelHeaderH,
+    panelMinStackH,
+    cardMinH,
+    cardMaxH,
+    controlsTop: height
+  };
+}
+
 function getCanvasPoint(e, canvasElt) {
   const rect = canvasElt.getBoundingClientRect();
   return {
-    x: e.clientX - rect.left,
-    y: e.clientY - rect.top
+    x: (e.clientX - rect.left) * (width / rect.width),
+    y: (e.clientY - rect.top) * (height / rect.height)
   };
+}
+
+function flashControl(id) {
+  controlPressFlash = { id, until: millis() + 160 };
+}
+
+function isControlFlashing(id) {
+  return controlPressFlash.id === id && millis() < controlPressFlash.until;
 }
 
 function setup() {
@@ -538,6 +634,10 @@ function setup() {
   });
   window.addEventListener('pointerup', () => {
     slider.dragging = false;
+  });
+  window.visualViewport?.addEventListener('resize', () => {
+    resizeCanvas(windowWidth, windowHeight);
+    updateLayout();
   });
 
   updateLayout();
@@ -912,101 +1012,120 @@ function applyCrossSchedule(generation, startTicks = 0) {
 // ==========================================
 
 function updateLayout() {
-  isMobile = width < 800; 
-  isShortScreen = height < 750;
+  layoutProfile = createLayoutProfile();
+  isMobile = layoutProfile.compactText; 
+  isShortScreen = layoutProfile.short;
   let cx = width / 2;
   ensureSelectedExercisePattern();
   
-  let by = height - Math.max(30, height * 0.05); 
-  let btnW = isMobile ? 80 : 100;
-  let spacing = isMobile ? 10 : 20;
+  let btnW = layoutProfile.controlButtonW;
+  let btnH = layoutProfile.controlButtonH;
+  let spacing = layoutProfile.controlSpacing;
+  let by = height - layoutProfile.bottomMargin - btnH;
   
-  btns.play = { x: cx - btnW - spacing/2, y: by, w: btnW, h: 40, label: () => isPlaying ? "PAUSE" : "PLAY" };
-  btns.reset = { x: cx + spacing/2, y: by, w: btnW, h: 40, label: () => "RESET" };
+  btns.play = { id: 'play', x: cx - btnW - spacing/2, y: by, w: btnW, h: btnH, hitPad: layoutProfile.touchPad, label: () => isPlaying ? "PAUSE" : "PLAY" };
+  btns.reset = { id: 'reset', x: cx + spacing/2, y: by, w: btnW, h: btnH, hitPad: layoutProfile.touchPad, label: () => "RESET" };
   
-  let sliderY = by - (isShortScreen ? 35 : 45);
-  slider = { x: cx - 125, y: sliderY, w: 250, h: 6, handleR: 10, dragging: slider.dragging };
+  let sliderW = constrain(width * (layoutProfile.phone ? 0.72 : 0.48), layoutProfile.phone ? 210 : 250, layoutProfile.tablet ? 360 : 320);
+  let sliderY = by - layoutProfile.sliderGap;
+  slider = { x: cx - sliderW / 2, y: sliderY, w: sliderW, h: 6, handleR: layoutProfile.touch ? 11 : 10, dragging: slider.dragging };
 
-  let aBtnW = isMobile ? 60 : 70;
-  let aGap = 15;
+  let aBtnW = layoutProfile.audioButtonW;
+  let aBtnH = layoutProfile.audioButtonH;
+  let aGap = layoutProfile.phone ? 10 : 15;
   let aStartX = cx - (aBtnW * 3 + aGap * 2) / 2;
   
-  let aStartY = sliderY - (isShortScreen ? 35 : 45); 
-  let paramOffset = appMode === 'phrase' ? (isShortScreen ? 35 : 40) : (isShortScreen ? 45 : 55); 
+  let aStartY = sliderY - layoutProfile.audioGap; 
+  layoutProfile.controlsTop = aStartY;
+  let paramOffset = appMode === 'phrase' ? (isShortScreen ? 34 : 40) : (isShortScreen ? 42 : 55); 
   let paramStartY = aStartY - paramOffset;
 
   audioBtnsLayout = [
-    { id: 'tala', label: 'TALA', x: aStartX, y: aStartY, w: aBtnW, h: 25, get: () => talaAudioMode, set: (m) => talaAudioMode = m },
-    { id: 'phrase', label: 'PHR', x: aStartX + aBtnW + aGap, y: aStartY, w: aBtnW, h: 25, get: () => phraseAudioMode, set: (m) => phraseAudioMode = m },
-    { id: 'jathi', label: 'JATHI', x: aStartX + (aBtnW + aGap)*2, y: aStartY, w: aBtnW, h: 25, get: () => jathiAudioMode, set: (m) => jathiAudioMode = m }
+    { id: 'audio-tala', label: 'TALA', x: aStartX, y: aStartY, w: aBtnW, h: aBtnH, hitPad: layoutProfile.touchPad, get: () => talaAudioMode, set: (m) => talaAudioMode = m },
+    { id: 'audio-phrase', label: 'PHR', x: aStartX + aBtnW + aGap, y: aStartY, w: aBtnW, h: aBtnH, hitPad: layoutProfile.touchPad, get: () => phraseAudioMode, set: (m) => phraseAudioMode = m },
+    { id: 'audio-jathi', label: 'JATHI', x: aStartX + (aBtnW + aGap)*2, y: aStartY, w: aBtnW, h: aBtnH, hitPad: layoutProfile.touchPad, get: () => jathiAudioMode, set: (m) => jathiAudioMode = m }
   ];
 
-  let modeW = 140;
-  let headerModeY = isShortScreen ? 60 : 90;
-  modeBtns.phrase = { x: cx - modeW - 5, y: headerModeY, w: modeW, h: 30, mode: 'phrase', label: 'Phrase Mode' };
-  modeBtns.cross = { x: cx + 5, y: headerModeY, w: modeW, h: 30, mode: 'cross', label: 'Gati / Jathi' };
+  let modeGap = layoutProfile.phone ? 8 : 10;
+  let modeW = min(layoutProfile.phone ? 126 : 140, (width - 34 - modeGap) / 2);
+  let headerModeY = layoutProfile.modeY;
+  modeBtns.phrase = { id: 'mode-phrase', x: cx - modeW - modeGap / 2, y: headerModeY, w: modeW, h: layoutProfile.modeH, hitPad: layoutProfile.touchPad, mode: 'phrase', label: 'Phrase Mode' };
+  modeBtns.cross = { id: 'mode-cross', x: cx + modeGap / 2, y: headerModeY, w: modeW, h: layoutProfile.modeH, hitPad: layoutProfile.touchPad, mode: 'cross', label: 'Gati / Jathi' };
 
   if (appMode === 'phrase') buildExercisePanels(sliderY, headerModeY);
   else buildCrossParamButtons(paramStartY);
 }
 
 function getRhythmGridMetrics() {
-  const maxGridW = min(width * 0.9, 1000);
-  const gap = isMobile ? 8 : 12;
-  const groupGap = isMobile ? 16 : 24;
-  const cardH = isMobile ? constrain(height * 0.125, 76, 96) : constrain(height * 0.18, 90, 140);
+  const twoRows = layoutProfile.gridTwoRows;
+  const maxGridW = min(width * (layoutProfile.phone ? 0.92 : 0.9), 1000);
+  const gap = layoutProfile.compactHeight ? 6 : (twoRows ? 8 : 12);
+  const groupGap = layoutProfile.compactHeight ? 12 : (twoRows ? 16 : 24);
+  let cardH;
   let startY;
 
-  if (isMobile) {
+  if (twoRows) {
     const modeBottom = max(modeBtns.phrase?.y ?? 0, modeBtns.cross?.y ?? 0) + (modeBtns.phrase?.h ?? 30);
-    startY = modeBottom + 16;
+    startY = modeBottom + (layoutProfile.compactHeight ? 8 : 14);
+    const reserveBelow = appMode === 'phrase' ? layoutProfile.panelMinStackH + gap : 62;
+    const availableH = max(70, layoutProfile.controlsTop - startY - reserveBelow);
+    cardH = constrain((availableH - gap * 2) / 2, layoutProfile.cardMinH, layoutProfile.cardMaxH);
   } else {
-    startY = height / 2 - cardH / 2 - (isShortScreen ? 10 : 20);
+    const modeBottom = max(modeBtns.phrase?.y ?? 0, modeBtns.cross?.y ?? 0) + (modeBtns.phrase?.h ?? 30);
+    const reserveBelow = appMode === 'phrase' ? layoutProfile.panelMinStackH + gap : 62;
+    const availableH = max(60, layoutProfile.controlsTop - modeBottom - reserveBelow - 12);
+    cardH = constrain(availableH * (layoutProfile.compactHeight ? 0.66 : 0.74), layoutProfile.cardMinH, layoutProfile.cardMaxH);
+    startY = max(modeBottom + (layoutProfile.compactHeight ? 8 : 16), height / 2 - cardH / 2 - (isShortScreen ? 14 : 20));
+    const maxStartY = layoutProfile.controlsTop - reserveBelow - cardH - gap;
+    startY = min(startY, maxStartY);
   }
 
-  const bottom = isMobile
+  const bottom = twoRows
     ? startY + cardH * 2 + gap * 2
     : startY + cardH;
 
-  return { maxGridW, gap, groupGap, cardH, startY, bottom };
+  return { maxGridW, gap, groupGap, cardH, startY, bottom, twoRows };
 }
 
 function buildExercisePanels(sliderY, headerModeY) {
   const phraseOpen = appMode === 'phrase' && isPhraseExercisePanelOpen;
   const exerciseOpen = appMode === 'phrase' && isExercisePreviewPanelOpen;
-  const panelW = min(isMobile ? width * 0.9 : width * 0.68, 780);
+  const panelW = min(layoutProfile.compactText ? width * 0.92 : width * 0.68, 780);
   const panelX = width / 2 - panelW / 2;
-  const headerH = isMobile ? 30 : 32;
-  const panelGap = isMobile ? 8 : 14;
-  const panelPadX = isMobile ? 10 : 14;
-  const panelPadTop = isMobile ? 8 : 12;
-  const rowGap = isMobile ? 6 : 8;
-  const colGap = isMobile ? 10 : 10;
-  const phraseCols = 4;
-  const exerciseCols = 4;
+  const headerH = layoutProfile.panelHeaderH;
+  const panelGap = layoutProfile.panelGap;
+  const panelPadX = layoutProfile.compactText ? 10 : 14;
+  const panelPadTop = layoutProfile.compactHeight ? 6 : (layoutProfile.compactText ? 8 : 12);
+  const rowGap = layoutProfile.compactHeight ? 5 : (layoutProfile.compactText ? 6 : 8);
+  const colGap = layoutProfile.compactHeight ? 8 : 10;
+  const phraseCols = (layoutProfile.phone && !layoutProfile.portrait && width >= 560) ? 4 : 4;
+  const exerciseCols = (layoutProfile.phone && !layoutProfile.portrait && width >= 560) ? 5 : 4;
   const phraseRows = Math.ceil(UI_PRESETS.phraseScales.length / phraseCols) + Math.ceil(UI_PRESETS.phraseMultipliers.length / phraseCols);
   const exerciseRows = Math.ceil(getAvailableExercisePatternIds().length / exerciseCols);
-  const btnH = isMobile ? 22 : 26;
+  const btnH = layoutProfile.compactHeight ? 20 : (layoutProfile.compactText ? 22 : 26);
   const phraseContentH = panelPadTop + (btnH * phraseRows) + (rowGap * (phraseRows - 1)) + 12;
-  const exerciseInfoH = isMobile ? 16 : 34;
+  const exerciseInfoH = layoutProfile.compactHeight ? 12 : (layoutProfile.compactText ? 16 : 34);
   const exerciseContentH = panelPadTop + exerciseInfoH + (btnH * exerciseRows) + (rowGap * max(0, exerciseRows - 1)) + 12;
-  const fullPanelH = headerH + max(phraseContentH, exerciseContentH);
-  const phraseH = phraseOpen ? fullPanelH : headerH;
-  const exerciseH = exerciseOpen ? fullPanelH : headerH;
-  const stackH = phraseH + panelGap + exerciseH;
-  const gridBottom = getRhythmGridMetrics().bottom + (isMobile ? 14 : 18);
-  const audioTop = audioBtnsLayout.length ? min(...audioBtnsLayout.map((btn) => btn.y)) - (isMobile ? 10 : 14) : sliderY - (isMobile ? 14 : 22);
+  const naturalPanelH = headerH + max(phraseContentH, exerciseContentH);
+  const gridBottom = getRhythmGridMetrics().bottom + (layoutProfile.compactHeight ? 4 : (isMobile ? 14 : 18));
+  const audioTop = audioBtnsLayout.length ? min(...audioBtnsLayout.map((btn) => btn.y)) - (layoutProfile.compactHeight ? 8 : (isMobile ? 10 : 14)) : sliderY - (isMobile ? 14 : 22);
   const minTop = max(headerModeY + 42, gridBottom);
-  const stackTop = isMobile ? minTop : max(minTop, audioTop - stackH);
+  const availableStackH = max(headerH * 2 + panelGap, audioTop - minTop);
+  const maxOpenPanelH = max(headerH, availableStackH - headerH - panelGap);
+  const fullPanelH = min(naturalPanelH, maxOpenPanelH);
+  const phrasePanelH = phraseOpen ? fullPanelH : headerH;
+  const exercisePanelH = exerciseOpen ? fullPanelH : headerH;
+  const stackH = phrasePanelH + panelGap + exercisePanelH;
+  const stackTop = max(minTop, audioTop - stackH);
 
   const phrasePanelY = stackTop;
-  const exercisePanelY = phrasePanelY + phraseH + panelGap;
+  const exercisePanelY = phrasePanelY + phrasePanelH + panelGap;
 
   buildParamButtons({
     x: panelX,
     y: phrasePanelY,
     w: panelW,
-    h: phraseH,
+    h: phrasePanelH,
     fullH: fullPanelH,
     headerH,
     padX: panelPadX,
@@ -1021,7 +1140,7 @@ function buildExercisePanels(sliderY, headerModeY) {
     x: panelX,
     y: exercisePanelY,
     w: panelW,
-    h: exerciseH,
+    h: exercisePanelH,
     fullH: fullPanelH,
     headerH,
     padX: panelPadX,
@@ -1041,18 +1160,20 @@ function buildCrossParamButtons(startY) {
   paramBtns = [];
 
   let cx = width / 2;
-  let btnW = isMobile ? 40 : 50;
-  let gap = 10;
+  let btnW = layoutProfile.compactText ? 44 : 50;
+  let btnH = layoutProfile.touch ? 28 : 25;
+  let gap = layoutProfile.compactText ? 8 : 10;
   let startX = cx - ((btnW * 4) + (gap * 3)) / 2;
   let vals = UI_PRESETS.crossValues;
+  let rowGap = layoutProfile.compactHeight ? 30 : 35;
 
   vals.forEach((v, i) => {
     let isDisabled = (v === currentJathi);
-    paramBtns.push({ x: startX + i * (btnW + gap), y: startY - 35, w: btnW, h: 25, val: v, type: 'gati', label: `G${v}`, disabled: isDisabled });
+    paramBtns.push({ x: startX + i * (btnW + gap), y: startY - rowGap, w: btnW, h: btnH, hitPad: layoutProfile.touchPad, val: v, type: 'gati', label: `G${v}`, disabled: isDisabled });
   });
   vals.forEach((v, i) => {
     let isDisabled = (v === currentGati);
-    paramBtns.push({ x: startX + i * (btnW + gap), y: startY, w: btnW, h: 25, val: v, type: 'jathi', label: `J${v}`, disabled: isDisabled });
+    paramBtns.push({ x: startX + i * (btnW + gap), y: startY, w: btnW, h: btnH, hitPad: layoutProfile.touchPad, val: v, type: 'jathi', label: `J${v}`, disabled: isDisabled });
   });
 }
 
@@ -1072,6 +1193,7 @@ function buildParamButtons(panelLayout) {
       y: startY + row * (panelLayout.btnH + panelLayout.rowGap),
       w: btnW,
       h: panelLayout.btnH,
+      hitPad: layoutProfile.touchPad,
       val: v,
       type: 'phraseScale',
       label: `L${v}`
@@ -1086,6 +1208,7 @@ function buildParamButtons(panelLayout) {
       y: startY + row * (panelLayout.btnH + panelLayout.rowGap),
       w: btnW,
       h: panelLayout.btnH,
+      hitPad: layoutProfile.touchPad,
       val: mult,
       type: 'phraseMult',
       label: `×${mult}`
@@ -1138,6 +1261,7 @@ function buildExercisePatternPreview(panelLayout) {
       y: btnY + row * (panelLayout.btnH + panelLayout.rowGap),
       w: btnW,
       h: panelLayout.btnH,
+      hitPad: layoutProfile.touchPad,
       label: getExerciseButtonLabel(patternId)
     });
   });
@@ -1183,7 +1307,7 @@ function drawStartScreen() {
 
 function drawHeader(vState) {
   push(); textAlign(CENTER, TOP);
-  fill('#E0C097'); textSize(28); text("ĀDI TĀḶA", width / 2, isShortScreen ? 15 : 20);
+  fill('#E0C097'); textSize(layoutProfile.compactHeight ? 22 : 28); text("ĀDI TĀḶA", width / 2, layoutProfile.titleY ?? (isShortScreen ? 15 : 20));
   
   fill(120); textSize(12);
   let sub = '';
@@ -1211,7 +1335,7 @@ function drawHeader(vState) {
       ? `G${currentGati} vs J${currentJathi} · W ${currentWin}/${totalWindows}`
       : `Gati ${currentGati} vs Jathi ${currentJathi} · Window ${currentWin}/${totalWindows} (Beats ${vState.cycleIndex * 8 + 1}-${Math.min((vState.cycleIndex + 1) * 8, cycleInfo.fullCycleBeats)})`;
   }
-  text(sub, width / 2, isShortScreen ? 45 : 60);
+  text(sub, width / 2, layoutProfile.subtitleY ?? (isShortScreen ? 45 : 60));
 
   Object.values(modeBtns).forEach(btn => {
     let active = (appMode === btn.mode);
@@ -1248,9 +1372,9 @@ function drawGlobalProgressBar(vState) {
 
 function drawRhythmGrid(vState) {
   push();
-  const { maxGridW, cardH, gap, groupGap, startY } = getRhythmGridMetrics();
+  const { maxGridW, cardH, gap, groupGap, startY, twoRows } = getRhythmGridMetrics();
   
-  if (isMobile) {
+  if (twoRows) {
     let topW = maxGridW; let cardW = (topW - gap * 3) / 4;
     drawBeatGroup(0, 4, width/2 - topW/2, startY, cardW, cardH, gap, vState);
     let bottomW = cardW * 4 + gap * 2 + groupGap; 
@@ -1509,10 +1633,12 @@ function drawControls() {
   text(`BPM: ${Math.round(currentBPM)}`, width / 2, slider.y + 12);
 
   [btns.play, btns.reset].forEach(btn => {
-    stroke('#E0C097'); fill('transparent');
+    const pressed = isControlFlashing(btn.id);
+    stroke(pressed ? '#FFFFFF' : '#E0C097');
+    fill(pressed ? 'rgba(224, 192, 151, 0.16)' : 'transparent');
     rect(btn.x, btn.y, btn.w, btn.h, 8);
-    noStroke(); fill('#E0C097');
-    textAlign(CENTER, CENTER); textSize(14);
+    noStroke(); fill(pressed ? '#FFFFFF' : '#E0C097');
+    textAlign(CENTER, CENTER); textSize(layoutProfile.compactHeight ? 13 : 14);
     text(btn.label(), btn.x + btn.w/2, btn.y + btn.h/2);
   });
   pop();
@@ -1627,9 +1753,9 @@ async function handleGesture(x, y) {
 }
 
 async function handleInput(x, y) {
-  if (isInside(x, y, btns.play)) { await togglePlay(); return; }
+  if (isInside(x, y, btns.play)) { flashControl('play'); await togglePlay(); return; }
   
-  if (isInside(x, y, btns.reset)) { resetTransport(); return; }
+  if (isInside(x, y, btns.reset)) { flashControl('reset'); resetTransport(); return; }
   
   for (let btn of Object.values(modeBtns)) { 
     if (isInside(x, y, btn)) { changeMode(btn.mode); return; }
@@ -1640,7 +1766,8 @@ async function handleInput(x, y) {
       x: exercisePreviewPanel.x,
       y: exercisePreviewPanel.y,
       w: exercisePreviewPanel.w,
-      h: exercisePreviewPanel.headerH ?? exercisePreviewPanel.h
+      h: exercisePreviewPanel.headerH ?? exercisePreviewPanel.h,
+      hitPad: layoutProfile.touchPad
     };
 
     if (isInside(x, y, headerRect)) {
@@ -1658,7 +1785,8 @@ async function handleInput(x, y) {
       x: phraseExercisePanel.x,
       y: phraseExercisePanel.y,
       w: phraseExercisePanel.w,
-      h: phraseExercisePanel.headerH ?? phraseExercisePanel.h
+      h: phraseExercisePanel.headerH ?? phraseExercisePanel.h,
+      hitPad: layoutProfile.touchPad
     };
 
     if (isInside(x, y, headerRect)) {
@@ -1706,7 +1834,8 @@ async function handleInput(x, y) {
   
   let hx = slider.x + map(currentBPM, 40, 180, 0, slider.w);
   let hy = slider.y + slider.h/2;
-  if (dist(x, y, hx, hy) < 30 || (x > slider.x && x < slider.x + slider.w && y > slider.y - 20 && y < slider.y + 20)) {
+  const sliderPad = layoutProfile.touch ? 28 : 20;
+  if (dist(x, y, hx, hy) < sliderPad + slider.handleR || isInside(x, y, { x: slider.x, y: slider.y, w: slider.w, h: slider.h, hitPad: sliderPad })) {
     slider.dragging = true; updateBPM(x);
   }
 }
@@ -1810,8 +1939,18 @@ function triggerScheduleUpdate() {
   if (wasPlaying) Tone.Transport.start();
 }
 
-function isInside(x, y, rectObj) {
-  return x > rectObj.x && x < rectObj.x + rectObj.w && y > rectObj.y && y < rectObj.y + rectObj.h;
+function isInside(x, y, rectObj, extraPad = 0) {
+  const pad = max(rectObj.hitPad ?? 0, extraPad);
+  const minW = layoutProfile.touch ? 44 : 0;
+  const minH = layoutProfile.touch ? 44 : 0;
+  const expandX = max(pad, (minW - rectObj.w) / 2);
+  const expandY = max(pad, (minH - rectObj.h) / 2);
+  return (
+    x >= rectObj.x - expandX &&
+    x <= rectObj.x + rectObj.w + expandX &&
+    y >= rectObj.y - expandY &&
+    y <= rectObj.y + rectObj.h + expandY
+  );
 }
 </script>
 </body>
